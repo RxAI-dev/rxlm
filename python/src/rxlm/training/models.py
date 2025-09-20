@@ -69,14 +69,17 @@ class JointTrainingModel(nn.Module):
         y_d = self.decoder(x_d, attention_mask=attention_mask)
         return y_d
 
-    def forward(self, x_e: torch.Tensor, x_d: torch.Tensor, attention_mask: torch.Tensor = None) -> tuple[
+    def forward(self, x_e: torch.Tensor, x_d: torch.Tensor, attention_mask: torch.Tensor = None, noise_level: float = None) -> tuple[
         torch.Tensor, torch.Tensor]:
         self.decoder.model.stm.reset()
 
         encoder_result, encoded_layers = self.encoder(x_e, attention_mask=attention_mask)
         y_e = self.mlm_head(encoder_result)
 
-        self.decoder.model.stm.update_all(encoded_layers.clone().detach())
+        detached_layers = encoded_layers.clone().detach()
+        fake_stm = detached_layers if noise_level is None else detached_layers + noise_level * torch.randn_like(detached_layers)
+
+        self.decoder.model.stm.update_all(fake_stm)
         y_d = self.decoder(x_d, attention_mask=attention_mask)
         return y_e, y_d
 

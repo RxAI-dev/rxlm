@@ -232,6 +232,7 @@ class JointLMTrainer(BaseTrainer):
             decoder_loss_scale: float = 1.0,
             use_moe_aux_loss: bool = False,
             moe_aux_loss_scale: float = 0.01,
+            fake_stm_noise_level: float = None,
             **kwargs
     ):
         super(JointLMTrainer, self).__init__(model, device, use_amp=use_amp, dtype=dtype, **kwargs)
@@ -241,6 +242,7 @@ class JointLMTrainer(BaseTrainer):
         self.decoder_loss_scale = decoder_loss_scale
         self.use_moe_aux_loss = use_moe_aux_loss
         self.moe_aux_loss_scale = moe_aux_loss_scale
+        self.fake_stm_noise_level = fake_stm_noise_level
 
     def train_step(self, batch: dict[str, Union[torch.Tensor, dict[torch.Tensor]]], batch_idx: int) -> torch.Tensor:
         if self.use_amp:
@@ -304,7 +306,8 @@ class JointLMTrainer(BaseTrainer):
         encoder_logits, decoder_logits = self.model(
             encoder_inputs,
             decoder_inputs,
-            attention_mask=attention_mask
+            attention_mask=attention_mask,
+            noise_level=self.fake_stm_noise_level,
         )
 
         encoder_loss = F.cross_entropy(
