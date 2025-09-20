@@ -1,0 +1,82 @@
+# Reactive AI Framework License (RAFL) v1.0
+
+**Effective Date:** September 20, 2025
+
+**Copyright (c) 2025 Reactive AI. All rights reserved.**
+
+This Reactive AI Framework License ("License") governs the use of the Reactive Language Models (RxLM - part of RxNN platform) software framework, its source code, binaries, documentation, and any associated materials (collectively, the "Software"). By using, copying, modifying, or distributing the Software, you ("Licensee") agree to all of the terms and conditions of this License.
+
+## 1. Definitions
+
+1.1. **"Software"** refers to the Reactive Language Models (RxLM) framework, including all its components, modules, source code, object code, and documentation provided by Reactive AI under this License.
+
+1.2. **"Reactive AI"** means Reactive AI, the licensor of the Software.
+
+1.3. **"Non-Commercial Use"** means use for academic research, personal experimentation, education, or other non-profit purposes, where neither the Licensee nor any third party generates revenue, receives monetary compensation, or seeks any commercial advantage, directly or indirectly, from such use.
+
+1.4. **"Commercial Use"** means any use that is not Non-Commercial Use. This includes, but is not limited to, using the Software in a product or service offered for a fee, embedding the Software in a commercial application, using the Software for internal business operations that generate revenue, or providing consulting or support services related to the Software for a fee.
+
+1.5. **"Reactive Transformer Architecture"** refers to the artificial intelligence architecture described in and covered by patent #P.453260 (and any subsequent or related patents), characterized by its stateful real-time processing and asynchronous memory updates.
+
+1.6. **"Covered Components"** are parts of the Software subject to the restrictions on Commercial Use as defined in Section 3. These components are essential for implementing or utilizing the Reactive Transformer Architecture.
+
+1.7. **"Free Components"** are parts of the Software licensed under the terms of the Apache License, Version 2.0, and may be used for any purpose, including Commercial Use, subject to the terms of that license, provided they are not used in conjunction with or to implement the Reactive Transformer Architecture.
+
+1.8. **"Derivative Work"** shall have the same meaning as in the United States Copyright Act, but for the purposes of this License, it specifically includes (a) any modifications to the Software's source code (a "Fork"), and (b) any artificial intelligence model weights, checkpoints, or artifacts that are created by training, fine-tuning, or otherwise modifying a model that was itself trained using the Covered Components (a "Derivative Model").
+
+## 2. Component License Mapping
+
+The Software is composed of distinct components governed by different license terms, as specified in the table below. This table is an integral part of this License.
+
+---
+**Table 2: RxLM Component License Mapping**
+
+| Component Type | RxLM Modules / Paths | Governing License |
+| :--- | :--- | :--- |
+| **Free Components** | `rxlm.transformers.attention` <br> `rxlm.transformers.positional` <br> `rxlm.transformers.ff` <br> `rxlm.transformers.moe` <br> `rxlm.transformers.llm_layers` <br> `rxlm.transformers.llm_models` <br> `rxlm.llm_training` <br> Any non-RxT specific utilities | Apache License, Version 2.0 |
+| **Covered Components** | `rxlm.transformers.layers` <br> `rxlm.transformers.models` <br> `rxlm.rxt` <br> `rxlm.memory` <br> `rxlm.training` <br> Any module implementing or enabling the Reactive Transformer Architecture | **This License (RAFL v1.0)** |
+
+---
+
+## 3. Grant of Rights and License Conditions
+
+3.1. **Grant for Free Components.** Reactive AI grants Licensee a license to the Free Components under the terms of the Apache License, Version 2.0.
+
+3.2. **Grant for Covered Components (Non-Commercial Use).** Subject to the terms of this License, Reactive AI grants Licensee a perpetual, worldwide, non-exclusive, royalty-free, irrevocable (except as stated in Section 6) license to:
+    a. Use, reproduce, modify, and distribute the Covered Components, solely for Non-Commercial Use.
+    b. Create and distribute Forks of the Covered Components, solely for Non-Commercial Use and subject to the obligations in Section 4.
+
+3.3. **Restrictions on Commercial Use.** Licensee is not granted any right to, and shall not, use the Covered Components for any Commercial Use. Furthermore, Licensee shall not use the Free Components in any manner that implements, enables, or is used in conjunction with the Reactive Transformer Architecture for any Commercial Use. Any and all Commercial Use of the Software or the Reactive Transformer Architecture requires a separate, written commercial license agreement with Reactive AI (the "Reactive AI Commercial License Agreement" or "RCLA").
+
+## 4. Obligations for Forks and Modifications (Copyleft)
+
+4.1. **Non-Commercial Forks.** Any Fork of the Software that includes or is derived from Covered Components must be distributed under the terms of this License (RAFL v1.0) or a later version published by Reactive AI. Licensee must:
+    a. Retain this license, all copyright notices, and patent markings in the Fork.
+    b. Conspicuously mark all modified files, and maintain a summary of changes.
+    c. Within 30 days of creating a public Fork, notify Reactive AI via email to `licensing@rxai.dev`, providing the URL of the repository and a brief description of the Fork's purpose.
+
+4.2. **Commercial Forks.** The creation of a Fork for Commercial Use is strictly prohibited without a valid RCLA from Reactive AI.
+
+## 5. Obligations for Trained Models
+
+Any Derivative Model created using the Covered Components of the Software must be licensed and distributed under the terms of the "Reactive AI Model & Architecture License (RAML) v1.0" or a later version. This obligation applies regardless of the data used for training or fine-tuning. Distributing or making a Derivative Model available via an API is considered a form of distribution subject to this clause.
+
+## 6. Patent License
+
+6.1. **Patent Grant for Non-Commercial Use.** Subject to the terms and conditions of this License, Reactive AI grants to Licensee a perpetual, worldwide, non-exclusive, no-charge, royalty-free, irrevocable (except as stated in this section) patent license to make, have made, use, and import the Software for Non-Commercial Use, under any patent claims owned or licensable by Reactive AI that are necessarily infringed by the Software alone.
+
+6.2. **No Patent Grant for Commercial Use.** This License does not grant Licensee any right or license under any patent claims for Commercial Use. Any such rights must be obtained through a separate RCLA.
+
+6.3. **Defensive Termination.** If Licensee institutes patent litigation against any entity (including a cross-claim or counterclaim in a lawsuit) alleging that the Software or the Reactive Transformer Architecture constitutes direct or contributory patent infringement, then any patent licenses granted to Licensee under this License for that Software shall terminate as of the date such litigation is filed.
+
+## 7. Disclaimers and Limitation of Liability
+
+7.1. **No Warranty.** THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+
+7.2. **Limitation of Liability.** IN NO EVENT SHALL REACTIVE AI OR ITS AFFILIATES BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+## 8. General
+
+8.1. **Governing Law.** This License is governed by the laws of the Republic of Poland. Any disputes arising under this License shall be resolved in the competent courts of Warsaw.
+
+8.2. **Attribution.** Licensee must include a conspicuous notice in any distribution of the Software or in any application built with it, stating: "Powered by Reactive AI's RxLM Framework (Patent #P.453260) - part of Reactive Neural Networks (RxNN) ecosystem. Licensed under the RAFL v1.0. Commercial use requires a separate license."

@@ -1,0 +1,30 @@
+# Reactive AI Model & Architecture License (RAML) v1.0
+
+**Effective Date:** September 20, 2025
+**Copyright (c) 2025 Reactive AI. All rights reserved.**
+
+This license governs the use of artificial intelligence models, including their weights, configurations, and associated artifacts (the "Model"), provided by Reactive AI, as well as any derivative models created from them. It also governs the use of the underlying patented Reactive Transformer Architecture.
+
+By using, copying, modifying, or distributing the Model, you agree to all of the terms and conditions of this License.
+
+## You are free to:
+
+*   **Share** — copy and redistribute the Model in any medium or format.
+*   **Adapt** — remix, transform, and build upon the Model (e.g., through fine-tuning).
+
+The licensor cannot revoke these freedoms as long as you follow the license terms.
+
+## Under the following terms:
+
+1.  **Attribution (BY)** — You must give appropriate credit to Reactive AI, provide a link to this license, and indicate if changes were made. You must also include the following notice: "This model is based on the Reactive Transformer Architecture (Patent #P.453260) by Reactive AI." You may do so in any reasonable manner, but not in any way that suggests Reactive AI endorses you or your use.
+
+2.  **NonCommercial (NC)** — You may not use the Model for commercial purposes. A commercial use is one primarily intended for or directed toward commercial advantage or monetary compensation. This includes, but is not limited to, selling the model, offering access to the model via a paid API, using the model in a commercial product or service, or using the model for internal business operations that generate revenue. Any Commercial Use requires a separate, written commercial license agreement with Reactive AI.
+
+3.  **ShareAlike (SA)** — If you remix, transform, or build upon the Model, you must distribute your contributions (the "Derivative Model") under this same license (RAML v1.0) or a compatible later version. Making a Derivative Model available via an API is considered a form of distribution.
+
+4.  **Architectural Use Clause** — The creation of new models that implement the Reactive Transformer Architecture (as defined in and covered by pending patent #P.453260) is only permitted using a version of the framework from Reactive Neural Network (RxNN) platform, like Reactive Language Models (RxLM) or third-party framework that is properly licensed from Reactive AI. Any attempt to create such a model using a different, unlicensed software framework is a violation of this license and may constitute patent infringement.
+
+## Notices:
+
+*   **No additional restrictions** — You may not apply legal terms or technological measures that legally restrict others from doing anything this license permits.
+*   **No warranties are given.** The license may not give you all of the permissions necessary for your intended use. For example, other rights such as publicity, privacy, or moral rights may limit how you use the material. The data used to train this model may be subject to separate third-party rights.
