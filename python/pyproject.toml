@@ -3,11 +3,9 @@ requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
-name = "rxnn"
+name = "rxlm"
 version = "0.1.0"
 description = "RxNN - RxLM: Reactive Language Models platform"
-
-license = "RAFL v1.0"
 
 authors = [
     "Adam Filipek <adamfilipek@rxai.dev>"
@@ -17,10 +15,21 @@ repository = "https://github.com/RxAI-dev/rxlm"
 homepage = "https://rxai.dev/rxnn"
 
 # README file(s) are used as the package description
-readme = ["README.md", "LICENSE"]
+readme = ["README.md", "LICENSE", "MODELS_LICENSE"]
 
 # Keywords (translated to tags on the package index)
 keywords = ["deep-learning", "ai", "machine-learning", "natural-language-processing", "nlp", "agi", "memory-system"]
+
+[project]
+name = "rxlm"
+version = "0.1.0"
+description = "RxNN - RxLM: Reactive Language Models platform"
+
+license-files = [
+    "LICENSE",
+    "MODELS_LICENSE"
+]
+
 
 [tool.poetry.dependencies]
 python = ">=3.10"

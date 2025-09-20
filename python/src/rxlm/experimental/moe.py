@@ -10,7 +10,7 @@ class MoeFeedForwardVectorized(nn.Module):
     Commented out implementation is fixing this problem, but is causing memory overflows, because of experts weights
     indexing - it's using ~15x more memory, than dense model of similar size, so it's currently not viable.
 
-    It's recommended to use standard MoE from rxnn.transformers.moe instead.
+    It's recommended to use standard MoE from rxlm.transformers.moe instead.
     """
 
     def __init__(
