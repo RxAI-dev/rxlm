@@ -77,7 +77,7 @@ class JointTrainingModel(nn.Module):
         y_e = self.mlm_head(encoder_result)
 
         detached_layers = encoded_layers.clone().detach()
-        fake_stm = detached_layers if noise_level is None else detached_layers + noise_level * torch.randn_like(detached_layers)
+        fake_stm = detached_layers if noise_level is None else detached_layers + noise_level * torch.randn_like(detached_layers, device=detached_layers.device)
 
         self.decoder.model.stm.update_all(fake_stm)
         y_d = self.decoder(x_d, attention_mask=attention_mask)

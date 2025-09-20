@@ -467,7 +467,7 @@ class SparseQueryAttention(MultiHeadAttention):
         return q, k, v
 
     def _calculate_attention(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, b: int, t: int, d: int, mask: torch.Tensor = None, generate_mode: bool = False):
-        is_gqa = self.num_query_groups != self.num_groups and self.num_groups > self.num_query_groups
+        is_gqa = self.num_query_groups != self.num_groups and self.num_groups < self.num_query_groups
 
         # reversed SQA (revSQA)
         if self.num_query_groups < self.num_groups:
