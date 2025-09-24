@@ -1442,7 +1442,9 @@ class MRLTrainer:
             dist.init_process_group(backend='nccl', rank=rank, world_size=world_size)
             self.actor = DistributedDataParallel(self.actor, device_ids=[self.device.index], find_unused_parameters=ddp_find_unused_parameters)
             self.critic = DistributedDataParallel(self.critic, device_ids=[self.device.index])
+            self.reference_model = DistributedDataParallel(self.reference_model, device_ids=[self.device.index])
 
+        self.reference_model = self.reference_model.to(self.device)
         # 2. Init BatchSampler with actor model (we have to run it after DDP init)
         self.generator = BatchSampler(self.actor, self.device, end_token_id=self.end_token_id, answer_token_id=self.answer_token_id, pad_token_id=self.pad_token_id, use_self_attn_cache=self.use_self_attn_cache)
 
