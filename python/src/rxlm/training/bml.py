@@ -3,6 +3,7 @@ import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel
 import math
 from typing import Union
+from sklearn.metrics import f1_score
 from ..transformers.models import ReactiveTransformerDecoder
 from ..training.base import BaseTrainer
 from .models import MLMTrainingModel, JointTrainingModel
@@ -112,13 +113,14 @@ class MLMTrainer(BaseTrainer):
 class AutoregressiveTrainer(BaseTrainer):
     def __init__(
             self,
-            model: ReactiveTransformerDecoder,
+            model: torch.nn.Module,
             device: torch.device,
             vocab_size: int,
             use_amp: bool = False,
             dtype: torch.dtype = None,
             use_moe_aux_loss: bool = False,
             moe_aux_loss_scale: float = 0.01,
+            use_f1_metrics: bool = False,
             **kwargs
     ):
         super(AutoregressiveTrainer, self).__init__(model, device, use_amp=use_amp, dtype=dtype,
@@ -126,6 +128,7 @@ class AutoregressiveTrainer(BaseTrainer):
         self.vocab_size = vocab_size
         self.use_moe_aux_loss = use_moe_aux_loss
         self.moe_aux_loss_scale = moe_aux_loss_scale
+        self.use_f1_metrics = use_f1_metrics
 
     def compute_loss(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         inputs = batch['input_ids']
@@ -173,6 +176,9 @@ class AutoregressiveTrainer(BaseTrainer):
         correct = torch.tensor(0).to(self.device)
         total = torch.tensor(0).to(self.device)
 
+        all_preds: list[torch.Tensor] = []
+        all_labels: list[torch.Tensor] = []
+
         with torch.no_grad():
             for batch in val_dataloader:
                 if self.get_batch_size(batch) == batch_size:
@@ -198,16 +204,57 @@ class AutoregressiveTrainer(BaseTrainer):
                         correct += batch_correct
                         total += batch_total
 
+                        if self.use_f1_metrics:
+                            # Collect predictions and labels for F1 score
+                            all_preds.append(preds[valid_indices].cpu())
+                            all_labels.append(shifted_targets[valid_indices].cpu())
+
         avg_loss = (val_loss / len(val_dataloader)).item()
         acc = (correct / total * 100) if total > 0 else torch.tensor(0.0).to(self.device)
         node_acc = acc.item()
         if self.use_ddp:
             acc = distributed_mean(acc)
 
-        metrics = {
-            'accuracy': acc.item(),
-            'node_accuracy': node_acc,
-        }
+        f1_macro = 0.0
+        f1_weighted = 0.0
+
+        if self.use_f1_metrics:
+            if self.use_ddp:
+                local_preds = torch.cat(all_preds) if all_preds else torch.empty(0, dtype=torch.long)
+                local_labels = torch.cat(all_labels) if all_labels else torch.empty(0, dtype=torch.long)
+
+                gathered_preds = [torch.zeros_like(local_preds) for _ in range(torch.distributed.get_world_size())]
+                gathered_labels = [torch.zeros_like(local_labels) for _ in range(torch.distributed.get_world_size())]
+                torch.distributed.all_gather(gathered_preds, local_preds)
+                torch.distributed.all_gather(gathered_labels, local_labels)
+
+                all_preds_tensor = torch.cat(gathered_preds).cpu().numpy()
+                all_labels_tensor = torch.cat(gathered_labels).cpu().numpy()
+            else:
+                all_preds_tensor = torch.cat(all_preds).cpu().numpy() if all_preds else np.array([])
+                all_labels_tensor = torch.cat(all_labels).cpu().numpy() if all_labels else np.array([])
+
+
+            if len(all_labels_tensor) > 0:
+                f1_macro = f1_score(all_labels_tensor, all_preds_tensor, average='macro')
+                f1_weighted = f1_score(all_labels_tensor, all_preds_tensor, average='weighted')
+
+                if self.writer is not None and (not self.use_ddp or torch.distributed.get_rank() == 0):
+                    self.writer.add_scalar('F1 Macro/Valid total', f1_macro, self.total_validation_steps)
+                    self.writer.add_scalar('F1 Weighted/Valid total', f1_weighted, self.total_validation_steps)
+
+        if self.use_f1_metrics:
+            metrics = {
+                'f1_macro': f1_macro,
+                'f1_weighted': f1_weighted,
+                'accuracy': acc.item(),
+                'node_accuracy': node_acc,
+            }
+        else:
+            metrics = {
+                'accuracy': acc.item(),
+                'node_accuracy': node_acc,
+            }
         self.model.train()
         return avg_loss, metrics
 

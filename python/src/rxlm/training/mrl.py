@@ -68,6 +68,7 @@ class MrlTrajectoryStep(TypedDict):
     state: tuple[TokenizedDict, TokenizedDict, TokenizedDict]
     action: TokenizedDict
     log_probs: torch.Tensor
+    ref_log_probs: Optional[torch.Tensor]
     reward: torch.Tensor
     reference: TokenizedDict
     done: bool
@@ -188,6 +189,7 @@ class MRLTrainer:
             self,
             actor: MrlActorModel,
             critic: MrlCriticModel,
+            reference_model: MrlActorModel,
             reward: MrlRewardModel,
             device: torch.device,
             config: MrlConfig,
@@ -216,6 +218,12 @@ class MRLTrainer:
         """
         self.actor = actor
         self.critic = critic
+        self.reference_model = reference_model
+
+        for p in self.reference_model.parameters():
+            p.requires_grad = False
+        self.reference_model.eval()
+
         self.shared_reward_model = reward
         self.reward = reward
         self.device = device
@@ -637,6 +645,7 @@ class MRLTrainer:
                                 'state': (query, answer, interaction['query']),
                                 'action': cpu_detached_answer,
                                 'log_probs': log_probs.detach().cpu(),
+                                'ref_log_probs': None,
                                 'reward': reward.detach().cpu(),
                                 'reference': interaction['answer'],
                                 'done': is_last_interaction,
@@ -801,6 +810,7 @@ class MRLTrainer:
             action: TokenizedDict,
             advantages: torch.Tensor,
             old_log_probs: torch.Tensor,
+            ref_log_probs: torch.Tensor,
             epoch: int,
             step_idx: int,
             prev_step_log_probs: Optional[torch.Tensor] = None,
@@ -833,7 +843,7 @@ class MRLTrainer:
                 # 6.2 Calculate policy loss with selected algorithm
                 policy_loss, this_step_log_probs, extras = self.rl_algorithm.policy_loss(
                     next_query, action, logits, old_log_probs, advantages,
-                    initial_stm, updated_stm, step_idx, prev_step_log_probs=prev_step_log_probs
+                    initial_stm, updated_stm, ref_log_probs, step_idx, prev_step_log_probs=prev_step_log_probs
                 )
                 policy_loss = self._moe_aux_loss(policy_loss)
 
@@ -862,7 +872,7 @@ class MRLTrainer:
             # 6.2 Calculate policy loss with selected algorithm
             policy_loss, this_step_log_probs, extras = self.rl_algorithm.policy_loss(
                 next_query, action, logits, old_log_probs, advantages,
-                initial_stm, updated_stm, step_idx, prev_step_log_probs=prev_step_log_probs
+                initial_stm, updated_stm, ref_log_probs, step_idx, prev_step_log_probs=prev_step_log_probs
             )
             policy_loss = self._moe_aux_loss(policy_loss)
             # 6.3 Run backpropagation
@@ -918,10 +928,11 @@ class MRLTrainer:
             for step_idx, step in enumerate(episode_steps):
                 self._increment_steps('train')
                 # 5. Get and move to device collected states, action and log probs
-                state, action, _, log_probs = step['state'], step['action'], step['reward'], step['log_probs']
+                state, action, _, log_probs, ref_log_probs = step['state'], step['action'], step['reward'], step['log_probs'], step['ref_log_probs']
                 query, answer, next_query = self._move_multiple_batches(*state)
                 action = self._move_batch(action)
                 log_probs = log_probs.to(self.device)
+                ref_log_probs = ref_log_probs.to(self.device)
 
                 # 6. Select advantages and reference values for current step (batch_size)
                 step_critic_values = episode_critic_values[step_idx]
@@ -943,7 +954,7 @@ class MRLTrainer:
                 # 9. Update actor
                 policy_loss_item, stored_prev_step_log_probs = self.update_actor(
                     (query, answer, next_query),
-                    action, step_advantages, log_probs,
+                    action, step_advantages, log_probs, ref_log_probs,
                     epoch, step_idx, prev_step_log_probs=prev_step_log_probs
                 )
 
@@ -973,10 +984,13 @@ class MRLTrainer:
             return self.critic(inputs['input_ids'],
                                attention_mask=inputs['attention_mask']).squeeze()
 
-    def get_pre_update_log_probs(self, trajectories: list[MrlTrajectoryEpisode]) -> list[MrlTrajectoryEpisode]:
+    def get_pre_update_log_probs(self, trajectories: list[MrlTrajectoryEpisode], for_ref_model: bool = False) -> list[MrlTrajectoryEpisode]:
         new_trajectories = []
 
-        print('Recomputing old log probs')
+        if for_ref_model:
+            print('Computing ref model log probs')
+        else:
+            print('Recomputing old log probs')
 
         with torch.no_grad():
             for episode_idx, episode in enumerate(trajectories):
@@ -1008,7 +1022,11 @@ class MRLTrainer:
                             # 6.1 Concatenate next query and action and get action logits from decoder
                             inputs = smart_concat(next_query, action, max_length=self.max_seq_len,
                                                   pad_token_id=self.pad_token_id)
-                            logits = self.actor(inputs['input_ids'], attention_mask=inputs['attention_mask'],
+                            if for_ref_model:
+                                logits = self.reference_model(inputs['input_ids'], attention_mask=inputs['attention_mask'],
+                                                action=MrlActorAction.DECODE)
+                            else:
+                                logits = self.actor(inputs['input_ids'], attention_mask=inputs['attention_mask'],
                                                 action=MrlActorAction.DECODE)
                             if self.clamp_logits is not None:
                                 logits = logits.clamp(min=-self.clamp_logits, max=self.clamp_logits)
@@ -1017,16 +1035,26 @@ class MRLTrainer:
                         # 6.1 Concatenate next query and action and get action logits from decoder
                         inputs = smart_concat(next_query, action, max_length=self.max_seq_len,
                                               pad_token_id=self.pad_token_id)
-                        logits = self.actor(inputs['input_ids'], attention_mask=inputs['attention_mask'],
-                                            action=MrlActorAction.DECODE)
+                        if for_ref_model:
+                            logits = self.reference_model(inputs['input_ids'], attention_mask=inputs['attention_mask'],
+                                                          action=MrlActorAction.DECODE)
+                        else:
+                            logits = self.actor(inputs['input_ids'], attention_mask=inputs['attention_mask'],
+                                                action=MrlActorAction.DECODE)
                         if self.clamp_logits is not None:
                             logits = logits.clamp(min=-self.clamp_logits, max=self.clamp_logits)
                         log_probs = self._get_answer_log_probs(next_query, action, logits)
 
-                    new_episode_steps.append({
-                        **step,
-                        'log_probs': log_probs.detach().cpu(),
-                    })
+                    if for_ref_model:
+                        new_episode_steps.append({
+                            **step,
+                            'ref_log_probs': log_probs.detach().cpu(),
+                        })
+                    else:
+                        new_episode_steps.append({
+                            **step,
+                            'log_probs': log_probs.detach().cpu(),
+                        })
                 new_trajectories.append({
                     **episode,
                     'steps': new_episode_steps,
@@ -1072,6 +1100,8 @@ class MRLTrainer:
         # 1. Collect trajectories for current epoch
         self.actor.eval()
         trajectories = self.collect_trajectories(dataloader, epoch, batch_size)
+
+        trajectories = self.get_pre_update_log_probs(trajectories, for_ref_model=True)
 
         if self.log_probs_source == 'update':
             trajectories = self.get_pre_update_log_probs(trajectories)

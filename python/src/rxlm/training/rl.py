@@ -15,7 +15,7 @@ class RlAlgorithm(ABC):
     @abstractmethod
     def policy_loss(self, query: TokenizedDict, answer: TokenizedDict, logits: torch.Tensor,
                     old_log_probs: torch.Tensor, advantages: torch.Tensor, prev_stm_state: torch.Tensor, new_stm_state: torch.Tensor,
-                    step: int, prev_step_log_probs: Optional[torch.Tensor] = None) -> tuple[torch.Tensor, torch.Tensor, dict]:
+                    ref_log_probs: torch.Tensor, step: int, prev_step_log_probs: Optional[torch.Tensor] = None) -> tuple[torch.Tensor, torch.Tensor, dict]:
         pass
 
     @abstractmethod
@@ -36,6 +36,7 @@ class PPOConfig(TypedDict):
     critic_value_clip: Optional[float]
     debug_mode: Optional[bool]
     debug_interval: Optional[int]
+    ref_kl_coef: Optional[float]
 
 
 class PPOAlgorithm(RlAlgorithm):
@@ -58,6 +59,7 @@ class PPOAlgorithm(RlAlgorithm):
         self.gae_lambda = config.get('gae_lambda', 0.95)
         self.gae_gamma = config.get('gae_gamma', 0.99)
         self.entropy_coef = config.get('entropy_coef', 0.01)
+        self.ref_kl_coef = config.get('ref_kl_coef', 0.05)
         self.use_distributed_advantage_norm = config.get('use_distributed_advantage_norm', False)
         self.clip_critic_values = config.get('clip_critic_values', True)
         self.critic_value_clip = config.get('critic_value_clip', 20.0)
@@ -74,7 +76,7 @@ class PPOAlgorithm(RlAlgorithm):
 
     def policy_loss(self, query: TokenizedDict, answer: TokenizedDict, logits: torch.Tensor,
                     old_log_probs: torch.Tensor, advantages: torch.Tensor, prev_stm_state: torch.Tensor, new_stm_state: torch.Tensor,
-                    step: int, prev_step_log_probs: Optional[torch.Tensor] = None) -> tuple[torch.Tensor, torch.Tensor, dict]:
+                    ref_log_probs: torch.Tensor, step: int, prev_step_log_probs: Optional[torch.Tensor] = None) -> tuple[torch.Tensor, torch.Tensor, dict]:
         # 1. Get query, answer, max and combined lengths in batch
         query_lens = query['attention_mask'].sum(dim=1).long()  # Query lengths per sample
         answer_mask = answer['attention_mask']
@@ -138,7 +140,19 @@ class PPOAlgorithm(RlAlgorithm):
         ).mean()
         policy_loss -= self.entropy_coef * entropy
 
+        # 9. Reference KL-div penalty
+        kl_loss = self.kl_penalty(ref_log_probs, new_log_probs, shifted_mask)
+        if self.debug_step != 0 and self.debug_step % self.debug_interval == 0:
+            print(
+                f'---- KL penalty: {kl_loss.item():.4f}, scaled: {(self.ref_kl_coef * kl_loss).item():.4f}')
+        policy_loss += self.ref_kl_coef * kl_loss
+
         return policy_loss, new_log_probs.clone().detach(), {}
+
+    def kl_penalty(self, ref_log_probs: torch.Tensor, new_log_probs: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        kl = (ref_log_probs.exp() * (ref_log_probs - new_log_probs)) * mask
+        kl_loss = kl.sum() / (mask.sum() + 1e-8)
+        return kl_loss
 
     def _compute_gae(self, rewards: torch.Tensor, values: torch.Tensor,
                      last_value: torch.Tensor, dones: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -184,10 +198,11 @@ class IMPOConfig(TypedDict):
     critic_value_clip: Optional[float]
     debug_mode: Optional[bool]
     debug_interval: Optional[int]
-    kl_coeff: Optional[float]
-    stm_diff_coeff: Optional[float]
+    ref_kl_coef: Optional[float]
+    interstep_kl_coef: Optional[float]
+    stm_diff_coef: Optional[float]
     use_stm_cosine_sim: Optional[bool]
-    cosine_sim_coeff: Optional[float]
+    cosine_sim_coef: Optional[float]
 
 
 class IMPOAlgorithm(RlAlgorithm):
@@ -195,8 +210,8 @@ class IMPOAlgorithm(RlAlgorithm):
     Implicit Memory Policy Optimization (IMPO) algorithm for Memory Reinforcement Learning.
 
     It's a modified version of PPO with simplified advantages and additional loss terms:
-    - STM diff loss (MSE) - with coeff based on square root of current step number (each next
-      step should have smaller STM update) - `sqrt(step + 1) * stm_diff_coeff * mse(new_stm, old_stm)`
+    - STM diff loss (MSE) - with coef based on square root of current step number (each next
+      step should have smaller STM update) - `sqrt(step + 1) * stm_diff_coef * mse(new_stm, old_stm)`
     - Policy Consistency Loss - KL div between current and previous step policies (interactions with same
       topic should have similar policies)
 
@@ -220,10 +235,11 @@ class IMPOAlgorithm(RlAlgorithm):
         self.debug_mode = config.get('debug_mode', False)
         self.debug_interval = config.get('debug_interval', 10)
         self.use_gae = config.get('use_gae', False)
-        self.kl_coeff = config.get('kl_coeff', 0.001)
-        self.stm_diff_coeff = config.get('stm_diff_coeff', 0.0001) # should be higher for non-sigmoid residual gates
+        self.ref_kl_coef = config.get('ref_kl_coef', 0.05)
+        self.interstep_kl_coef = config.get('interstep_kl_coef', 0.01)
+        self.stm_diff_coef = config.get('stm_diff_coef', 0.0001) # should be higher for non-sigmoid residual gates
         self.use_stm_cosine_sim = config.get('use_stm_cosine_sim', False)
-        self.cosine_sim_coeff = config.get('cosine_sim_coeff', 0.01)
+        self.cosine_sim_coef = config.get('cosine_sim_coef', 0.01)
         self.debug_step = 0
         
         # Additional losses
@@ -239,7 +255,7 @@ class IMPOAlgorithm(RlAlgorithm):
 
     def policy_loss(self, query: TokenizedDict, answer: TokenizedDict, logits: torch.Tensor,
                     old_log_probs: torch.Tensor, advantages: torch.Tensor, prev_stm_state: torch.Tensor, new_stm_state: torch.Tensor,
-                    step: int, prev_step_log_probs: Optional[torch.Tensor] = None) -> tuple[torch.Tensor, torch.Tensor, dict]:
+                    ref_log_probs: torch.Tensor, step: int, prev_step_log_probs: Optional[torch.Tensor] = None) -> tuple[torch.Tensor, torch.Tensor, dict]:
         # 1. Get query, answer, max and combined lengths in batch
         query_lens = query['attention_mask'].sum(dim=1).long()  # Query lengths per sample
         answer_mask = answer['attention_mask']
@@ -271,6 +287,7 @@ class IMPOAlgorithm(RlAlgorithm):
         shifted_log_probs = new_log_probs.gather(-1, shifted_targets.unsqueeze(-1)).squeeze(-1)
         shifted_log_probs *= shifted_mask
         old_log_probs *= shifted_mask
+        ref_log_probs *= shifted_mask
 
         # 5. Calculate ratio
         ratio = (shifted_log_probs - old_log_probs).exp()
@@ -302,17 +319,24 @@ class IMPOAlgorithm(RlAlgorithm):
         ).mean()
         policy_loss -= self.entropy_coef * entropy
 
-        # 9. Calculate step policy consistency loss
-        if prev_step_log_probs is not None:
-            kl_loss = self.policy_consistency_loss(prev_step_log_probs, new_log_probs.exp(), entropy_mask)
-            if self.debug_step != 0 and self.debug_step % self.debug_interval == 0:
-                print(f'---- KL loss: {kl_loss.item():.4f}, scaled: {(self.kl_coeff * kl_loss).item():.4f}')
-            policy_loss += self.kl_coeff * kl_loss
-        else:
-            kl_loss = None
+        # 9. Reference KL-div penalty
+        kl_loss = self.kl_penalty(ref_log_probs, new_log_probs, shifted_mask)
+        if self.debug_step != 0 and self.debug_step % self.debug_interval == 0:
+            print(
+                f'---- KL penalty: {kl_loss.item():.4f}, scaled: {(self.ref_kl_coef * kl_loss).item():.4f}')
+        policy_loss += self.ref_kl_coef * kl_loss
 
-        # 10. Calculate STM diff loss
-        mem_diff_scale = torch.sqrt(torch.tensor(step + 1).to(new_stm_state.device)) * self.stm_diff_coeff
+        # 10. Calculate step policy consistency loss
+        if prev_step_log_probs is not None:
+            interstep_kl_loss = self.policy_consistency_loss(prev_step_log_probs, new_log_probs.exp(), entropy_mask)
+            if self.debug_step != 0 and self.debug_step % self.debug_interval == 0:
+                print(f'---- Interstep KL loss: {interstep_kl_loss.item():.4f}, scaled: {(self.interstep_kl_coef * interstep_kl_loss).item():.4f}')
+            policy_loss += self.interstep_kl_coef * interstep_kl_loss
+        else:
+            interstep_kl_loss = None
+
+        # 11. Calculate STM diff loss
+        mem_diff_scale = torch.sqrt(torch.tensor(step + 1).to(new_stm_state.device)) * self.stm_diff_coef
         if self.use_stm_cosine_sim:
             mem_sim = F.cosine_similarity(new_stm_state, prev_stm_state, dim=-1).mean()
             policy_loss -= mem_sim
@@ -322,29 +346,34 @@ class IMPOAlgorithm(RlAlgorithm):
         mem_diff_loss = self.stm_diff_loss_fn(new_stm_state, prev_stm_state)
         policy_loss += mem_diff_scale * mem_diff_loss
 
-        return policy_loss, new_log_probs.clone().detach(), { 'stm_diff_loss': mem_diff_loss, 'policy_consistency_loss': kl_loss, 'stm_cosine_sim_loss': mem_sim }
+        return policy_loss, new_log_probs.clone().detach(), { 'stm_diff_loss': mem_diff_loss, 'policy_consistency_loss': interstep_kl_loss, 'stm_cosine_sim_loss': mem_sim }
+
+    def kl_penalty(self, ref_log_probs: torch.Tensor, new_log_probs: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        kl = (ref_log_probs.exp() * (ref_log_probs - new_log_probs)) * mask
+        kl_loss = kl.sum() / (mask.sum() + 1e-8)
+        return kl_loss
 
     def policy_consistency_loss(self, prev_step_log_probs: torch.Tensor, this_step_probs: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         # 1. Apply mask to both distributions
         mask_expanded = mask.unsqueeze(-1)  # [batch, seq_len, 1]
-        masked_log_probs = prev_step_log_probs * mask_expanded
-        masked_probs = this_step_probs * mask_expanded
+        masked_prev_log_probs = prev_step_log_probs * mask_expanded
+        masked_current_probs = this_step_probs * mask_expanded
 
         # 2. Flatten while preserving mask
         batch_size, seq_len, vocab_size = prev_step_log_probs.shape
-        flat_log_probs = masked_log_probs.view(-1, vocab_size)
-        flat_probs = masked_probs.view(-1, vocab_size)
+        flat_prev_log_probs = masked_prev_log_probs.view(-1, vocab_size)
+        flat_current_probs = masked_current_probs.view(-1, vocab_size)
 
         # 3. Filter out completely masked positions
         valid_indices = mask.flatten().bool()
-        valid_log_probs = flat_log_probs[valid_indices]
-        valid_probs = flat_probs[valid_indices]
+        valid_prev_log_probs = flat_prev_log_probs[valid_indices]
+        valid_current_probs = flat_current_probs[valid_indices]
 
         # 4. Compute KL divergence only for valid positions
-        if len(valid_log_probs) > 0:
+        if len(valid_prev_log_probs) > 0:
             kl_loss = self.policy_consistency_loss_fn(
-                valid_log_probs,
-                valid_probs,
+                valid_prev_log_probs,
+                valid_current_probs,
             )
         else:
             kl_loss = torch.tensor(0.0).to(mask.device)
