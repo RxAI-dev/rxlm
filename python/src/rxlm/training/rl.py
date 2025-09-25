@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from abc import ABC, abstractmethod
-from typing import TypedDict, Optional
+from typing import TypedDict, Optional, Literal
 from .utils import TokenizedDict
 from .ddp import distributed_mean
 
@@ -141,7 +141,7 @@ class PPOAlgorithm(RlAlgorithm):
         policy_loss -= self.entropy_coef * entropy
 
         # 9. Reference KL-div penalty
-        kl_loss = self.kl_penalty(ref_log_probs, new_log_probs, shifted_mask)
+        kl_loss = self.kl_penalty(ref_log_probs, shifted_log_probs, shifted_mask)
         if self.debug_step != 0 and self.debug_step % self.debug_interval == 0:
             print(
                 f'---- KL penalty: {kl_loss.item():.4f}, scaled: {(self.ref_kl_coef * kl_loss).item():.4f}')
@@ -203,6 +203,7 @@ class IMPOConfig(TypedDict):
     stm_diff_coef: Optional[float]
     use_stm_cosine_sim: Optional[bool]
     cosine_sim_coef: Optional[float]
+    advantage_mode: Literal['batch', 'step', 'all']
 
 
 class IMPOAlgorithm(RlAlgorithm):
@@ -241,7 +242,8 @@ class IMPOAlgorithm(RlAlgorithm):
         self.use_stm_cosine_sim = config.get('use_stm_cosine_sim', False)
         self.cosine_sim_coef = config.get('cosine_sim_coef', 0.01)
         self.debug_step = 0
-        
+        self.advantage_mode = config.get('advantage_mode', 'all')
+
         # Additional losses
         self.policy_consistency_loss_fn = nn.KLDivLoss(reduction='batchmean', log_target=False)
         self.stm_diff_loss_fn = nn.MSELoss()
@@ -320,7 +322,7 @@ class IMPOAlgorithm(RlAlgorithm):
         policy_loss -= self.entropy_coef * entropy
 
         # 9. Reference KL-div penalty
-        kl_loss = self.kl_penalty(ref_log_probs, new_log_probs, shifted_mask)
+        kl_loss = self.kl_penalty(ref_log_probs, shifted_log_probs, shifted_mask)
         if self.debug_step != 0 and self.debug_step % self.debug_interval == 0:
             print(
                 f'---- KL penalty: {kl_loss.item():.4f}, scaled: {(self.ref_kl_coef * kl_loss).item():.4f}')
@@ -339,7 +341,7 @@ class IMPOAlgorithm(RlAlgorithm):
         mem_diff_scale = torch.sqrt(torch.tensor(step + 1).to(new_stm_state.device)) * self.stm_diff_coef
         if self.use_stm_cosine_sim:
             mem_sim = F.cosine_similarity(new_stm_state, prev_stm_state, dim=-1).mean()
-            policy_loss -= mem_sim
+            policy_loss -= self.cosine_sim_coef * mem_sim
         else:
             mem_sim = torch.tensor(0.0)
 
@@ -350,7 +352,7 @@ class IMPOAlgorithm(RlAlgorithm):
 
     def kl_penalty(self, ref_log_probs: torch.Tensor, new_log_probs: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         kl = (ref_log_probs.exp() * (ref_log_probs - new_log_probs)) * mask
-        kl_loss = kl.sum() / (mask.sum() + 1e-8)
+        kl_loss = (kl.sum(dim=-1) / (mask.sum(dim=-1) + 1e-8)).mean()
         return kl_loss
 
     def policy_consistency_loss(self, prev_step_log_probs: torch.Tensor, this_step_probs: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -392,8 +394,96 @@ class IMPOAlgorithm(RlAlgorithm):
             std_advantage = distributed_mean(advantages.std())
             normalized_advantages = (advantages - mean_advantage) / (std_advantage + 1e-8)
         else:
-            normalized_advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+            if self.use_gae:
+                normalize_mask = ~dones.unsqueeze(-1)[:-1, :].expand_as(advantages)
+                if self.advantage_mode == 'all':
+                    normalized_advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+                elif self.advantage_mode == 'batch':
+                    normalized_advantages = self.normalize_advantages_flatten(advantages, normalize_mask)
+                else:
+                    normalized_advantages = self.normalize_advantages_per_step_with_mask(advantages, normalize_mask)
+            else:
+                if self.advantage_mode == 'all':
+                    normalized_advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+                elif self.advantage_mode == 'batch':
+                    normalize_mask = ~dones.unsqueeze(-1).expand_as(advantages)
+                    normalized_advantages = self.normalize_advantages_flatten(advantages, normalize_mask)
+                else:
+                    normalized_advantages = self.normalize_advantages_per_step(advantages)
+
         return normalized_advantages, ref_values
+
+    def normalize_advantages_per_step_with_mask(self, advantages: torch.Tensor, mask: torch.Tensor, eps: float = 1e-8,
+                                      clip: float = 10.0) -> torch.Tensor:
+        """
+        advantages: [T, B]
+        mask: [T, B]
+        Normalizes along batch axis for each timestep t separately.
+        """
+        advantages = advantages.transpose(0, 1).contiguous()
+        mask = mask.transpose(0, 1).contiguous()
+
+        B, T = advantages.shape
+        out = torch.zeros_like(advantages)
+        for t in range(T):
+            valid = mask[:, t].bool()
+            if valid.sum() == 0:
+                continue
+            vals = advantages[valid, t]
+            mean = vals.mean()
+            std = vals.std(unbiased=False)
+            normed = (vals - mean) / (std + eps)
+            normed = torch.clamp(normed, -clip, clip)
+            out[valid, t] = normed
+
+        out = out.transpose(0, 1).contiguous()
+        return out
+
+    def normalize_advantages_per_step(self, advantages: torch.Tensor, eps: float = 1e-8,
+                                      clip: float = 10.0) -> torch.Tensor:
+        """
+        advantages: [T, B]
+        mask: [T, B]
+        Normalizes along batch axis for each timestep t separately.
+        """
+
+        T, B = advantages.shape
+        out = torch.zeros_like(advantages)
+        for t in range(T):
+            vals = advantages[t, :]
+            mean = vals.mean()
+            std = vals.std(unbiased=False)
+            normed = (vals - mean) / (std + eps)
+            normed = torch.clamp(normed, -clip, clip)
+            out[t, :] = normed
+
+        return out
+
+    def normalize_advantages_flatten(self, advantages: torch.Tensor, mask: torch.Tensor, eps=1e-8, clip=10.0) -> torch.Tensor:
+        """
+        advantages: [T, B]  (we'll handle both)
+        mask: same shape, 0/1 for valid positions
+        Returns normalized advantages same shape.
+        """
+        advantages = advantages.transpose(0, 1).contiguous()
+        mask = mask.transpose(0, 1).contiguous()
+
+        # flatten valid entries
+        flat = advantages[mask.bool()]
+        if flat.numel() == 0:
+            return advantages  # nothing to normalize
+
+        mean = flat.mean()
+        std = flat.std(unbiased=False)  # population std
+        flat_norm = (flat - mean) / (std + eps)
+        flat_norm = torch.clamp(flat_norm, -clip, clip)
+
+        # put back
+        out = advantages.clone()
+        out[mask.bool()] = flat_norm
+
+        out = out.transpose(0, 1).contiguous()
+        return out
 
     def _compute_gae(self, rewards: torch.Tensor, values: torch.Tensor,
                      last_value: torch.Tensor, dones: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:

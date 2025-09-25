@@ -189,7 +189,7 @@ class MrlActorModel(nn.Module):
 
         # Freeze/unfreeze decoder
         if self.decoder.freeze_without_memory is not None:
-            if stage == 'fetch':
+            if stage == 'fetch' or stage == 'update':
                 self.decoder.freeze_without_memory(unfreeze_norms=True)
             else:
                 self.decoder.freeze_without_memory(unfreeze_norms=True)
@@ -197,7 +197,7 @@ class MrlActorModel(nn.Module):
         else:
             for param in self.decoder.parameters():
                 param.requires_grad = False
-            self.decoder.model.trainable_cross_attention_(True if stage == 'fetch' else False, with_norms=True)
+            self.decoder.model.trainable_cross_attention_(True if stage == 'fetch' or stage == 'update' else False, with_norms=True)
 
         # Freeze/unfreeze memory attention
         if self.memory_attention.unfreeze is not None:

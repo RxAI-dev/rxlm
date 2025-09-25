@@ -403,7 +403,7 @@ class MRLTrainer:
             else:
                 return False
 
-    def encode_and_update_stm(self, query: TokenizedDict, answer: TokenizedDict):
+    def encode_and_update_stm(self, query: TokenizedDict, answer: TokenizedDict, for_ref_model: bool = False):
         """Encode interaction and update STM."""
         # 1. Encode data and update memory - with autocast on/off
         if self.use_amp:
@@ -411,12 +411,20 @@ class MRLTrainer:
                 # 2. Concatenate batch of queries and answers (they are already on training device)
                 inputs = smart_concat(query, answer, self.max_seq_len, self.pad_token_id)
                 # 3. Encode data and update STM
-                self.actor(inputs['input_ids'], attention_mask=inputs['attention_mask'], action=MrlActorAction.UPDATE)
+                if for_ref_model:
+                    self.reference_model(inputs['input_ids'], attention_mask=inputs['attention_mask'],
+                               action=MrlActorAction.UPDATE)
+                else:
+                    self.actor(inputs['input_ids'], attention_mask=inputs['attention_mask'], action=MrlActorAction.UPDATE)
         else:
             # 2. Concatenate batch of queries and answers (they are already on training device)
             inputs = smart_concat(query, answer, self.max_seq_len, self.pad_token_id)
             # 3. Encode data and update STM
-            self.actor(inputs['input_ids'], attention_mask=inputs['attention_mask'], action=MrlActorAction.UPDATE)
+            if for_ref_model:
+                self.reference_model(inputs['input_ids'], attention_mask=inputs['attention_mask'],
+                                     action=MrlActorAction.UPDATE)
+            else:
+                self.actor(inputs['input_ids'], attention_mask=inputs['attention_mask'], action=MrlActorAction.UPDATE)
 
     def generate_answer(self, query: TokenizedDict) -> tuple[TokenizedDict, torch.Tensor]:
         """Generate response using batch sampler with decoder."""
@@ -1010,12 +1018,15 @@ class MRLTrainer:
                     query, answer, next_query = self._move_multiple_batches(*state)
                     action = self._move_batch(action)
 
-                    self.actor.clone_reset_memory()
+                    if for_ref_model:
+                        self.reference_model.clone_reset_memory()
+                    else:
+                        self.actor.clone_reset_memory()
 
                     if should_reset_stm and step_idx == 0:
                         self.memory_warmup(query, answer)
 
-                    self.encode_and_update_stm(query, answer)
+                    self.encode_and_update_stm(query, answer, for_ref_model=for_ref_model)
 
                     if self.use_amp:
                         with torch.amp.autocast(device_type=self.device.type, dtype=self.dtype):
@@ -1286,25 +1297,25 @@ class MRLTrainer:
             fetch_epoch, update_epoch, all_epoch = unfreeze_epoch
 
             if isinstance(fetch_epoch, tuple):
-                switch_epoch, decoder_lr = fetch_epoch
+                switch_epoch, unfreeze_lr = fetch_epoch
                 if epoch == switch_epoch:
                     self.actor.unfreeze_components(freeze_embeddings=self.freeze_embeddings)
-                    self.optimizer = self._init_unfreeze_optimizer('fetch', decoder_lr)
-                    print(f"Activating 'fetch' unfreeze strategy with custom decoder lr: {decoder_lr}")
+                    self.optimizer = self._init_unfreeze_optimizer('fetch', unfreeze_lr)
+                    print(f"Activating 'fetch' unfreeze strategy with custom decoder/encoder lr: {unfreeze_lr}")
             elif epoch == fetch_epoch:
                 self.actor.freeze_components('fetch', freeze_embeddings=self.freeze_embeddings)
                 print(
-                    f"Activating 'fetch' unfreeze strategy - memory-attention, encoder and decoder cross-attention trainable / rest of decoder frozen")
+                    f"Activating 'fetch' unfreeze strategy - memory-attention and decoder cross-attention trainable / rest of the model frozen")
             if isinstance(update_epoch, tuple):
-                switch_epoch, decoder_lr = update_epoch
+                switch_epoch, unfreeze_lr = update_epoch
                 if epoch == switch_epoch:
                     self.actor.unfreeze_components(freeze_embeddings=self.freeze_embeddings)
-                    self.optimizer = self._init_unfreeze_optimizer('update', decoder_lr)
-                    print(f"Activating 'update' unfreeze strategy with custom decoder lr: {decoder_lr}")
+                    self.optimizer = self._init_unfreeze_optimizer('update', unfreeze_lr)
+                    print(f"Activating 'update' unfreeze strategy with custom decoder not memory lr: {unfreeze_lr}")
             elif epoch == update_epoch:
                 self.actor.freeze_components('update', freeze_embeddings=self.freeze_embeddings)
                 print(
-                    f"Activating 'update' unfreeze strategy - memory-attention and encoder trainable / decoder frozen")
+                    f"Activating 'update' unfreeze strategy - memory-attention, encoder and decoder cross-attention trainable / rest of decoder frozen")
             if epoch == all_epoch:
                 self.actor.unfreeze_components(freeze_embeddings=self.freeze_embeddings)
                 self.optimizer = self._init_unfreeze_optimizer('all', 0.)
@@ -1327,13 +1338,13 @@ class MRLTrainer:
                 {'params': self.actor.embedding_parameters(), 'lr': embedding_lr},
                 {'params': self.actor.encoder.not_memory_parameters(), 'lr': encoder_lr},
                 {'params': self.actor.memory_attention_parameters(), 'lr': memory_attn_lr},
-                {'params': self.actor.decoder.memory_parameters(), 'lr': unfreeze_lr},
+                {'params': self.actor.decoder.memory_parameters(), 'lr': memory_lr},
                 {'params': self.actor.decoder.not_memory_parameters(), 'lr': unfreeze_lr},
             ]
         elif mode == 'fetch':
             params = [
                 {'params': self.actor.embedding_parameters(), 'lr': embedding_lr},
-                {'params': self.actor.encoder.not_memory_parameters(), 'lr': encoder_lr},
+                {'params': self.actor.encoder.not_memory_parameters(), 'lr': unfreeze_lr},
                 {'params': self.actor.memory_attention_parameters(), 'lr': memory_attn_lr},
                 {'params': self.actor.decoder.memory_parameters(), 'lr': memory_lr},
                 {'params': self.actor.decoder.not_memory_parameters(), 'lr': unfreeze_lr},
