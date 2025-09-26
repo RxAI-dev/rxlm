@@ -29,24 +29,6 @@ class MLMHead(nn.Module, PyTorchModelHubMixin, license="apache-2.0"):
         return self.decoder(x)
 
 
-class MLMTrainingModel(nn.Module):
-    def __init__(
-            self,
-            encoder: RxTEncoder,
-            mlm_head: MLMHead,
-            *args,
-            **kwargs
-    ):
-        super(MLMTrainingModel, self).__init__(*args, **kwargs)
-        self.encoder = encoder
-        self.mlm_head = mlm_head
-
-    def forward(self, x: torch.Tensor, attention_mask: torch.Tensor = None) -> torch.Tensor:
-        h, _ = self.encoder(x, attention_mask=attention_mask)
-        y = self.mlm_head(h)
-        return y
-
-
 class JointTrainingModel(nn.Module):
     def __init__(
             self,

@@ -31,10 +31,10 @@ The Software is composed of distinct components governed by different license te
 ---
 **Table 2: RxLM Component License Mapping**
 
-| Component Type | RxLM Modules / Paths | Governing License |
-| :--- | :--- | :--- |
-| **Free Components** | `rxlm.transformers.attention` <br> `rxlm.transformers.positional` <br> `rxlm.transformers.ff` <br> `rxlm.transformers.moe` <br> `rxlm.transformers.llm_layers` <br> `rxlm.transformers.llm_models` <br> `rxlm.llm_training` <br> Any non-RxT specific utilities | Apache License, Version 2.0 |
-| **Covered Components** | `rxlm.transformers.layers` <br> `rxlm.transformers.models` <br> `rxlm.rxt` <br> `rxlm.memory` <br> `rxlm.training` <br> Any module implementing or enabling the Reactive Transformer Architecture | **This License (RAFL v1.0)** |
+| Component Type | RxLM Modules / Paths                                                                                                                                                                                                                                                                                                                                                                    | Governing License |
+| :--- |:----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------| :--- |
+| **Free Components** | `rxlm.transformers.attention` <br> `rxlm.transformers.positional` <br> `rxlm.transformers.ff` <br> `rxlm.transformers.moe` <br> `rxlm.transformers.llm_layers` <br> `rxlm.transformers.llm_models` <br> `rxlm.llm_training` <br> `rxlm.training.callbacks` <br> `rxlm.training.scheduler` <br> `rxlm.training.tokenizer` <br> `rxlm.training.utils` <br> Any non-RxT specific utilities | Apache License, Version 2.0 |
+| **Covered Components** | `rxlm.transformers.layers` <br> `rxlm.transformers.models` <br> `rxlm.rxt` <br> `rxlm.memory` <br> `rxlm.training.bml` <br> `rxlm.training.models` <br> `rxlm.training.dataset` <br> `rxlm.training.mrl` <br> `rxlm.training.rl` <br> `rxlm.training.reward` <br> `rxlm.training.smst` <br> Any module implementing or enabling the Reactive Transformer Architecture                   | **This License (RAFL v1.0)** |
 
 ---
 

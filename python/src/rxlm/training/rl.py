@@ -319,6 +319,9 @@ class IMPOAlgorithm(RlAlgorithm):
         entropy = -(
             (new_log_probs * new_log_probs.exp() * entropy_mask.unsqueeze(-1)).sum(dim=-1) / (entropy_mask.sum(dim=-1).unsqueeze(-1) + 1e-8)
         ).mean()
+        if self.debug_step != 0 and self.debug_step % self.debug_interval == 0:
+            print(
+                f'---- Entropy bonus: {entropy.item():.4f}, scaled: {(self.entropy_coef * entropy).item():.4f}')
         policy_loss -= self.entropy_coef * entropy
 
         # 9. Reference KL-div penalty
