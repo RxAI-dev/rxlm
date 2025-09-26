@@ -119,6 +119,7 @@ class AutoregressiveTrainer(BaseTrainer):
             use_moe_aux_loss: bool = False,
             moe_aux_loss_scale: float = 0.01,
             use_f1_metrics: bool = False,
+            is_sft: bool = False,
             **kwargs
     ):
         super(AutoregressiveTrainer, self).__init__(model, device, use_amp=use_amp, dtype=dtype,
@@ -127,6 +128,7 @@ class AutoregressiveTrainer(BaseTrainer):
         self.use_moe_aux_loss = use_moe_aux_loss
         self.moe_aux_loss_scale = moe_aux_loss_scale
         self.use_f1_metrics = use_f1_metrics
+        self.is_sft = is_sft
 
     def compute_loss(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         inputs = batch['input_ids']
@@ -143,7 +145,8 @@ class AutoregressiveTrainer(BaseTrainer):
 
         loss = F.cross_entropy(
             shifted_logits.view(-1, self.vocab_size),
-            shifted_targets.view(-1)
+            shifted_targets.view(-1),
+            ignore_index=-100 if self.is_sft else None
         )
 
         return self._moe_aux_loss(loss), outputs

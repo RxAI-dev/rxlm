@@ -8,10 +8,10 @@ from ..transformers.llm_layers import ClassicTransformerLayer
 from ..transformers.llm_models import ClassicTransformerDecoder
 from ..transformers.ff import get_activation_layer
 from ..utils import get_model_size
-from .attention import init_experimental_attention
+from ..experimental.attention import init_experimental_attention
 
 
-class ExperimentalAttentionTransformerConfig(TypedDict):
+class DecoderOnlyTransformerConfig(TypedDict):
     num_layers: int
     vocab_size: int
     embed_dim: int
@@ -38,7 +38,7 @@ class ExperimentalAttentionTransformerConfig(TypedDict):
     init_identity_norm: bool
 
 
-class ExperimentalAttentionTransformer(nn.Module, PyTorchModelHubMixin, pipeline_tag="text-generation", license="apache-2.0"):
+class DecoderOnlyTransformer(nn.Module, PyTorchModelHubMixin, pipeline_tag="text-generation", license="apache-2.0"):
     """
     Research model for experiments with new attention layers.
 
@@ -73,7 +73,7 @@ class ExperimentalAttentionTransformer(nn.Module, PyTorchModelHubMixin, pipeline
             init_identity_norm: bool = False,
             **kwargs
     ):
-        super(ExperimentalAttentionTransformer, self).__init__(**kwargs)
+        super(DecoderOnlyTransformer, self).__init__(**kwargs)
         assert ff_activation in ['relu', 'gelu',
                                  'swish', 'silu', 'linear',
                                  'sigmoid'], 'Feed-forward activation could be "relu", "gelu", "swish", "silu", "linear", "sigmoid".'
@@ -124,8 +124,5 @@ class ExperimentalAttentionTransformer(nn.Module, PyTorchModelHubMixin, pipeline
     def params_count(self):
         return get_model_size(self.model)
 
-    def load_shared_embedding(self, embedding: nn.Embedding):
-        self.model.embedding = embedding
-
-    def forward(self, x: torch.Tensor, attention_mask: torch.Tensor = None) -> torch.Tensor:
-        return self.model(x, attention_mask=attention_mask)
+    def forward(self, x: torch.Tensor, attention_mask: torch.Tensor = None, use_self_attn_cache: bool = False, current_positions: torch.Tensor = None) -> torch.Tensor:
+        return self.model(x, attention_mask=attention_mask, use_self_attn_cache=use_self_attn_cache, current_positions=current_positions)
