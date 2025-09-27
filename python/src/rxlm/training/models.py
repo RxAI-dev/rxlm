@@ -130,10 +130,11 @@ class SupervisedMemoryAwareModel(nn.Module):
     def reset_memory(self, init_type: str = None):
         self.memory_attention.reset_memory(init_type)
 
-    def forward(self, x_e: torch.Tensor, x_d: torch.Tensor, encoder_mask: torch.Tensor = None, decoder_mask: torch.Tensor = None) -> torch.Tensor:
-        with torch.set_grad_enabled(not self.train_only_decoder):
-            _, encoded_layers = self.encoder(x_e, attention_mask=encoder_mask)
-            self.memory_attention(encoded_layers, attention_mask=encoder_mask)
+    def forward(self, x_e: torch.Tensor, x_d: torch.Tensor, encoder_mask: torch.Tensor = None, decoder_mask: torch.Tensor = None, is_first_step: bool = False) -> torch.Tensor:
+        if not is_first_step:
+            with torch.set_grad_enabled(not self.train_only_decoder):
+                _, encoded_layers = self.encoder(x_e, attention_mask=encoder_mask)
+                self.memory_attention(encoded_layers, attention_mask=encoder_mask)
 
         logits = self.decoder(x_d, attention_mask=decoder_mask)
         return logits

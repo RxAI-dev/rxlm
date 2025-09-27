@@ -143,11 +143,17 @@ class AutoregressiveTrainer(BaseTrainer):
         shifted_logits = outputs[:, :-1].contiguous()
         shifted_targets = targets[:, 1:].contiguous()
 
-        loss = F.cross_entropy(
-            shifted_logits.view(-1, self.vocab_size),
-            shifted_targets.view(-1),
-            ignore_index=-100 if self.is_sft else None
-        )
+        if self.is_sft:
+            loss = F.cross_entropy(
+                shifted_logits.view(-1, self.vocab_size),
+                shifted_targets.view(-1),
+                ignore_index=-100
+            )
+        else:
+            loss = F.cross_entropy(
+                shifted_logits.view(-1, self.vocab_size),
+                shifted_targets.view(-1),
+            )
 
         return self._moe_aux_loss(loss), outputs
 

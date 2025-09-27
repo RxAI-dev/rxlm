@@ -478,16 +478,22 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
 
                     first_query, first_answer, interactions = batch['query'], batch['answer'], batch['interactions']
 
-                    number_of_inner_steps = len(interactions)
+                    number_of_inner_steps = len(interactions) + 1
 
                     prev_query, prev_answer = self._move_multiple_batches(first_query, first_answer)
 
                     for inner_step_idx in range(number_of_inner_steps):
                         self.total_inner_steps += 1
-                        next_query, next_answer = self._move_multiple_batches(interactions[inner_step_idx]['query'],
-                                                                              interactions[inner_step_idx]['answer'])
+
+                        if inner_step_idx == 0:
+                            next_query, next_answer = prev_query, prev_answer
+                        else:
+                            next_query, next_answer = self._move_multiple_batches(interactions[inner_step_idx - 1]['query'],
+                                                                              interactions[inner_step_idx - 1]['answer'])
 
                         self.model.clone_reset_memory()
+
+                        query_lens = next_query['attention_mask'].sum(dim=-1)
 
                         if self.use_amp:
                             with torch.amp.autocast(device_type=self.device.type, dtype=self.dtype):
@@ -497,7 +503,7 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
                                     'next': smart_concat(next_query, next_answer, max_length=self.max_seq_len,
                                                          pad_token_id=self.pad_token_id),
                                 }
-                                loss, _ = self.compute_loss(train_batch)
+                                loss, _ = self.compute_loss(train_batch, query_lens=query_lens, is_first_step=inner_step_idx==0)
                         else:
                             train_batch = {
                                 'prev': smart_concat(prev_query, prev_answer, max_length=self.max_seq_len,
@@ -505,7 +511,7 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
                                 'next': smart_concat(next_query, next_answer, max_length=self.max_seq_len,
                                                      pad_token_id=self.pad_token_id),
                             }
-                            loss, _ = self.compute_loss(train_batch)
+                            loss, _ = self.compute_loss(train_batch, query_lens=query_lens, is_first_step=inner_step_idx==0)
 
                         orig_loss = loss.item()
                         self.accumulated_loss += orig_loss
@@ -538,7 +544,7 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
                                 loss_item = self.accumulated_loss / self.gradient_accumulation_steps
                                 self._train_writer(
                                     loss_item,
-                                    epoch_step=(batch_idx * (number_of_inner_steps + 1)) + inner_step_idx,
+                                    epoch_step=(batch_idx * number_of_inner_steps) + inner_step_idx,
                                     inner_step=inner_step_idx,
                                 )
 
@@ -621,7 +627,7 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
 
         return loss
 
-    def compute_loss(self, batch: dict[str, dict[str, torch.Tensor]]) -> tuple[torch.Tensor, torch.Tensor]:
+    def compute_loss(self, batch: dict[str, dict[str, torch.Tensor]], query_lens: torch.Tensor = None, is_first_step: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
         encoder_inputs = batch['prev']['input_ids']
         encoder_mask = batch['prev']['attention_mask']
         decoder_inputs = batch['next']['input_ids']
@@ -633,14 +639,20 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
             decoder_inputs,
             encoder_mask=encoder_mask,
             decoder_mask=decoder_mask,
+            is_first_step=is_first_step,
         )
 
         shifted_logits = decoder_logits[:, :-1].contiguous()
         shifted_targets = decoder_targets[:, 1:].contiguous()
 
+        for i in range(shifted_targets.size(0)):
+            end = query_lens[i].item()
+            shifted_targets[i, :end] = -100
+
         decoder_loss = F.cross_entropy(
             shifted_logits.view(-1, self.vocab_size),
-            shifted_targets.view(-1)
+            shifted_targets.view(-1),
+            ignore_index=-100,
         )
 
         decoder_loss = self._moe_aux_loss(decoder_loss)
@@ -721,16 +733,22 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
 
                     first_query, first_answer, interactions = batch['query'], batch['answer'], batch['interactions']
 
-                    number_of_inner_steps = len(interactions)
+                    number_of_inner_steps = len(interactions) + 1
 
                     prev_query, prev_answer = self._move_multiple_batches(first_query, first_answer)
 
                     for inner_step_idx in range(number_of_inner_steps):
                         self.total_inner_steps += 1
-                        next_query, next_answer = self._move_multiple_batches(interactions[inner_step_idx]['query'],
-                                                                              interactions[inner_step_idx]['answer'])
+
+                        if inner_step_idx == 0:
+                            next_query, next_answer = prev_query, prev_answer
+                        else:
+                            next_query, next_answer = self._move_multiple_batches(interactions[inner_step_idx - 1]['query'],
+                                                                              interactions[inner_step_idx - 1]['answer'])
 
                         self.model.clone_reset_memory()
+
+                        query_lens = next_query['attention_mask'].sum(dim=-1)
 
                         if self.use_amp:
                             with torch.amp.autocast(device_type=self.device.type, dtype=self.dtype):
@@ -740,7 +758,7 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
                                     'next': smart_concat(next_query, next_answer, max_length=self.max_seq_len,
                                                          pad_token_id=self.pad_token_id),
                                 }
-                                decoder_loss, decoder_logits = self.compute_loss(valid_batch)
+                                decoder_loss, decoder_logits = self.compute_loss(valid_batch, query_lens=query_lens, is_first_step=inner_step_idx==0)
                         else:
                             valid_batch = {
                                 'prev': smart_concat(prev_query, prev_answer, max_length=self.max_seq_len,
@@ -748,7 +766,7 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
                                 'next': smart_concat(next_query, next_answer, max_length=self.max_seq_len,
                                                      pad_token_id=self.pad_token_id),
                             }
-                            decoder_loss, decoder_logits = self.compute_loss(valid_batch)
+                            decoder_loss, decoder_logits = self.compute_loss(valid_batch, query_lens=query_lens, is_first_step=inner_step_idx==0)
 
                         val_loss += decoder_loss
 
@@ -756,6 +774,11 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
 
                         shifted_logits = decoder_logits[:, :-1].contiguous()
                         shifted_targets = valid_batch['next']['input_ids'][:, 1:].to(self.device).contiguous()
+
+                        for i in range(shifted_targets.size(0)):
+                            end = query_lens[i].item()
+                            shifted_targets[i, :end] = -100
+
                         valid_alm_indices = shifted_targets != -100
 
                         if valid_alm_indices.any():

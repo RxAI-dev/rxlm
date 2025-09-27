@@ -5,11 +5,8 @@ import math
 from typing import Union
 from sklearn.metrics import f1_score
 from ..training.base import BaseTrainer
-from .models import MLMTrainingModel, JointTrainingModel
+from .models import JointTrainingModel
 from .ddp import distributed_mean
-
-
-
 
 
 class JointLMTrainer(BaseTrainer):
@@ -33,6 +30,7 @@ class JointLMTrainer(BaseTrainer):
             use_moe_aux_loss: bool = False,
             moe_aux_loss_scale: float = 0.01,
             fake_stm_noise_level: float = None,
+            is_sft: bool = False,
             **kwargs
     ):
         super(JointLMTrainer, self).__init__(model, device, use_amp=use_amp, dtype=dtype, **kwargs)
@@ -43,6 +41,7 @@ class JointLMTrainer(BaseTrainer):
         self.use_moe_aux_loss = use_moe_aux_loss
         self.moe_aux_loss_scale = moe_aux_loss_scale
         self.fake_stm_noise_level = fake_stm_noise_level
+        self.is_sft = is_sft
 
     def train_step(self, batch: dict[str, Union[torch.Tensor, dict[torch.Tensor]]], batch_idx: int) -> torch.Tensor:
         if self.use_amp:
@@ -119,10 +118,17 @@ class JointLMTrainer(BaseTrainer):
         shifted_logits = decoder_logits[:, :-1].contiguous()
         shifted_targets = decoder_targets[:, 1:].contiguous()
 
-        decoder_loss = F.cross_entropy(
-            shifted_logits.view(-1, self.vocab_size),
-            shifted_targets.view(-1)
-        )
+        if self.is_sft:
+            decoder_loss = F.cross_entropy(
+                shifted_logits.view(-1, self.vocab_size),
+                shifted_targets.view(-1),
+                ignore_index=-100
+            )
+        else:
+            decoder_loss = F.cross_entropy(
+                shifted_logits.view(-1, self.vocab_size),
+                shifted_targets.view(-1)
+            )
 
         decoder_loss = self._moe_aux_loss(decoder_loss)
 

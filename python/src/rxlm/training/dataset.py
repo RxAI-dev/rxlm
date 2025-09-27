@@ -704,6 +704,11 @@ class JointSftDataset(BaseInteractionDataset):
             tokenize_in_background: bool = False,
             batch_size: int = 1,
             mask_prob: float = 0.15,
+            ignore_index: int = -100,
+            query_token: str = '[Q]',
+            answer_token: str = '[A]',
+            bos_token: str = '[BOS]',
+            eos_token: str = '[EOS]',
             *args,
             **kwargs
     ):
@@ -721,6 +726,41 @@ class JointSftDataset(BaseInteractionDataset):
             **kwargs
         )
         self.mask_prob = mask_prob
+        self.ignore_index = ignore_index
+        self.query_token = query_token
+        self.answer_token = answer_token
+        self.bos_token = bos_token
+        self.eos_token = eos_token
+
+    def _create_masked_labels(self, input_ids: torch.Tensor) -> torch.Tensor:
+        labels = input_ids.clone()
+
+        query_token_id = self.tokenizer.convert_tokens_to_ids(self.query_token)
+        answer_token_id = self.tokenizer.convert_tokens_to_ids(self.answer_token)
+        eos_token_id = self.tokenizer.convert_tokens_to_ids(self.eos_token)
+
+        in_answer = False
+        for i in range(len(input_ids)):
+            token = input_ids[i].item()
+            if token == answer_token_id:
+                in_answer = True
+            elif token in (query_token_id, eos_token_id):
+                in_answer = False
+
+            if not in_answer or token == answer_token_id:
+                labels[i] = self.ignore_index
+
+        return labels
+
+    def get_tokenized_text(self, idx: int, inter: dict = None):
+        inputs = super().get_tokenized_text(idx, inter=inter)
+
+        decoder_targets = self._create_masked_labels(inputs['input_ids'][0])
+
+        return {
+            **inputs,
+            'decoder_targets': decoder_targets,
+        }
 
     def __getitem__(self, idx: int) -> dict[str, dict[str, torch.Tensor]]:
         inputs = self.get_tokenized_text(idx)
@@ -733,7 +773,7 @@ class JointSftDataset(BaseInteractionDataset):
         decoder_input_ids = encoder_input_ids.clone()
 
         encoder_labels = encoder_input_ids.clone()
-        decoder_targets = encoder_input_ids.clone()
+        decoder_targets = inputs['decoder_targets']
 
         # Create masked indices
         masked_indices = torch.bernoulli(

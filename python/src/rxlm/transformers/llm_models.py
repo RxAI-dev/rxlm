@@ -27,6 +27,9 @@ class ClassicTransformerBase(nn.Module):
         self.layers = layers
         self.num_layers = len(layers) if layers else 0
 
+    def update_max_len(self, max_seq_len: int):
+        self.layers[0].update_max_len(max_seq_len)
+
     def moe_router_loss(self):
         return torch.stack([self.layers[i].moe_router_loss() for i in range(self.num_layers) if self.layers[i].use_moe or self.layers[i].use_moe_att]).mean()
 
