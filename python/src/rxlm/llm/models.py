@@ -124,5 +124,8 @@ class DecoderOnlyTransformer(nn.Module, PyTorchModelHubMixin, pipeline_tag="text
     def params_count(self):
         return get_model_size(self.model)
 
+    def reset_self_attn_cache(self):
+        return self.model.reset_self_attn_cache()
+
     def forward(self, x: torch.Tensor, attention_mask: torch.Tensor = None, use_self_attn_cache: bool = False, current_positions: torch.Tensor = None) -> torch.Tensor:
         return self.model(x, attention_mask=attention_mask, use_self_attn_cache=use_self_attn_cache, current_positions=current_positions)

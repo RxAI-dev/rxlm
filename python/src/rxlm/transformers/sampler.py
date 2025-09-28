@@ -265,14 +265,20 @@ def sample_batch(
 
 
 class BatchSampler:
-    def __init__(self, model: nn.Module, device: torch.device, end_token_id: int, answer_token_id: int, use_self_attn_cache: bool = True, first_normal_token_id: int = None, pad_token_id: int = 0):
+    def __init__(
+            self, model: nn.Module, device: torch.device, end_token_id: int, answer_token_id: int,
+            use_self_attn_cache: bool = True, first_normal_token_id: int = None, pad_token_id: int = 0,
+            use_stm_kv_cache: bool = True, use_first_empty_workaround: bool = True,
+    ):
         self.model = model.to(device)
         self.device = device
         self.end_token_id = end_token_id
         self.answer_token_id = answer_token_id
         self.pad_token_id = pad_token_id
         self.use_self_attn_cache = use_self_attn_cache
+        self.use_stm_kv_cache = use_stm_kv_cache
         self.first_normal_token_id = first_normal_token_id if first_normal_token_id is not None else (self.answer_token_id + 1)
+        self.use_first_empty_workaround = use_first_empty_workaround
 
     def __call__(
         self,
@@ -288,19 +294,23 @@ class BatchSampler:
         batch_size, max_seq_len = input_ids.shape
 
         initial_lens = attention_mask.sum(dim=1)
-        for i in range(batch_size):
-            input_ids[i, initial_lens[i]] = self.answer_token_id
-            attention_mask[i, initial_lens[i]] = 1
 
+        batch_range = torch.arange(batch_size, device=self.device)
+        input_ids[batch_range, initial_lens] = self.answer_token_id
+        attention_mask[batch_range, initial_lens] = 1
         initial_lens += 1
+
         current_lens = initial_lens.clone()
         finished = torch.zeros(batch_size, dtype=torch.bool, device=self.device)
         log_probs = torch.zeros((batch_size, max_gen_len), dtype=dtype, device=self.device)
         working_ids = input_ids.clone()
         working_mask = attention_mask.clone()
 
-        with torch.set_grad_enabled(not no_grad):
-            stm_kv_cache = self.model.prepare_stm_kv_cache()
+        if self.use_stm_kv_cache:
+            with torch.set_grad_enabled(not no_grad):
+                stm_kv_cache = self.model.prepare_stm_kv_cache()
+        else:
+            stm_kv_cache = None
 
         self.model.reset_self_attn_cache()
 
@@ -313,41 +323,56 @@ class BatchSampler:
 
             with torch.set_grad_enabled(not no_grad):
                 indices = (current_lens - 1).to(self.device)
-                # Slice input and mask up to the current max length among active sequences
                 if step == 0 or not self.use_self_attn_cache:
                     # prompt phase - cache input sequence
+                    # Slice input and mask up to the current max length among active sequences
                     inputs = working_ids[:, :max_len]
                     masks = working_mask[:, :max_len]
 
-                    logits = self.model(
-                        inputs,
-                        attention_mask=masks,
-                        stm_kv_cache=stm_kv_cache,
-                        use_self_attn_cache=self.use_self_attn_cache,
-                        current_positions=None,
-                    )
+                    if self.use_stm_kv_cache:
+                        logits = self.model(
+                            inputs,
+                            attention_mask=masks,
+                            stm_kv_cache=stm_kv_cache,
+                            use_self_attn_cache=self.use_self_attn_cache,
+                            current_positions=None,
+                        )
+                    else:
+                        logits = self.model(
+                            inputs,
+                            attention_mask=masks,
+                            use_self_attn_cache=self.use_self_attn_cache,
+                            current_positions=None,
+                        )
                 else:
                     # generate phase, use last token
                     finished_tokens = finished.unsqueeze(-1)
-                    row_idx = torch.arange(working_ids.size(0))
 
-                    selected_ids = working_ids[row_idx, indices].unsqueeze(-1)
-                    selected_masks = working_mask[row_idx, indices].unsqueeze(-1)
+                    selected_ids = working_ids[batch_range, indices].unsqueeze(-1)
+                    selected_masks = working_mask[batch_range, indices].unsqueeze(-1)
 
                     inputs = torch.where(finished_tokens == 0, selected_ids, self.pad_token_id)
-                    masks = torch.where(finished_tokens == 0, selected_masks, self.pad_token_id)
+                    masks = torch.where(finished_tokens == 0, selected_masks, 0)
 
-                    logits = self.model(
-                        inputs,
-                        attention_mask=masks,
-                        stm_kv_cache=stm_kv_cache,
-                        use_self_attn_cache=self.use_self_attn_cache,
-                        current_positions=indices,
-                    )
+                    if self.use_stm_kv_cache:
+                        logits = self.model(
+                            inputs,
+                            attention_mask=masks,
+                            stm_kv_cache=stm_kv_cache,
+                            use_self_attn_cache=self.use_self_attn_cache,
+                            current_positions=indices,
+                        )
+                    else:
+                        logits = self.model(
+                            inputs,
+                            attention_mask=masks,
+                            use_self_attn_cache=self.use_self_attn_cache,
+                            current_positions=indices,
+                        )
 
             # Get the last valid token index for each active sequence
             if step == 0 or not self.use_self_attn_cache:
-                last_logits = logits[torch.arange(batch_size, device=self.device), indices]
+                last_logits = logits[batch_range, indices]
             else:
                 last_logits = logits[:, -1]
 
@@ -357,30 +382,25 @@ class BatchSampler:
             )
 
             # Empty first token sampling workaround
-            if step == 0:
+            if self.use_first_empty_workaround and step == 0:
                 random_token = torch.randint(self.first_normal_token_id, logits.size(-1), size=(), device=self.device)
                 random_log_prob = torch.log(torch.rand(size=(), device=self.device))
 
                 next_tokens = torch.where(next_tokens == 0, random_token, next_tokens)
                 step_log_probs = torch.where(next_tokens == 0, random_log_prob, step_log_probs)
 
-            # Prepare active sequences mask
-            active_mask = (~finished) & (current_lens < max_seq_len)
-            if not active_mask.any():
-                break
             # Get positions to update
-            positions_to_update = current_lens
-            # Prepare indexing batch range
-            batch_range = torch.arange(batch_size, device=self.device)
+            positions_to_update = current_lens[active]
+            active_range = batch_range[active]
             # Vectorized working tensors update
-            working_ids[batch_range[active_mask], positions_to_update[active_mask]] = next_tokens[active_mask]
-            working_mask[batch_range[active_mask], positions_to_update[active_mask]] = 1
+            working_ids[active_range, positions_to_update] = next_tokens[active]
+            working_mask[active_range, positions_to_update] = 1
             # Vectorized log probs update
-            log_probs[batch_range[active_mask], step] = step_log_probs[active_mask].to(dtype=log_probs.dtype)
+            log_probs[active_range, step] = step_log_probs[active].to(dtype=log_probs.dtype)
             # Update lens for active tokens
-            current_lens += active_mask.long()
+            current_lens += active.long()
             # Update finished tensor if some batch items stopped generation
-            finished |= (next_tokens == self.end_token_id) & active_mask
+            finished |= (next_tokens == self.end_token_id) & active
 
         # Extract generated tokens
         generated_ids = torch.zeros((batch_size, max_gen_len), dtype=torch.long, device=self.device)

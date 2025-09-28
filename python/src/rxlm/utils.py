@@ -1,4 +1,6 @@
 import random, gc
+from typing import Iterable
+
 import torch
 import numpy as np
 
@@ -15,6 +17,11 @@ def human_format(num: int):
 def get_model_size(model: torch.nn.Module):
     """Calculate all models parameters with requires_grad param set as True"""
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    return f'Model params {human_format(trainable_params)}'
+
+def get_parameters_count(params: Iterable[torch.nn.Parameter]):
+    """Calculate all models parameters with requires_grad param set as True"""
+    trainable_params = sum(p.numel() for p in params if p.requires_grad)
     return f'Model params {human_format(trainable_params)}'
 
 def set_random_seed(seed: int):
