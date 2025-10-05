@@ -2,16 +2,14 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from typing import Optional, TypedDict, Union, Literal
-
-
-from .models import RxTMemBenchAction, RxTMemBenchModel
 from ..llm.models import DecoderOnlyTransformer
-from ..transformers.sampler import BatchSampler
-from .dataset import RxlmMemBenchDataset, LlmMemBenchDataset, LlmMemBenchDatasetItem
 from ..training.utils import smart_concat, TokenizedDict
-from .score import SimpleMemBenchScore, SimpleMemBenchScoreDict
+from .score import SimpleMrqBenchScore, SimpleMrqBenchScoreDict
+from .models import RxTMrqBenchModel, RxTMrqBenchAction
+from .dataset import RxlmMrqBenchDataset, LlmMrqBenchDataset
+from .sampler import MrqBenchBatchSampler
 
-class MemBenchTokenizerConfig(TypedDict):
+class MrqBenchTokenizerConfig(TypedDict):
     pad_token_id: int
     end_token_id: int
     answer_token_id: int
@@ -23,15 +21,14 @@ class SamplerConfig(TypedDict):
     top_p: Optional[float]
 
 
-class MemBenchRunner:
+class MrqBenchRunner:
     def __init__(
             self,
-            steps: int,
             device: torch.device,
-            score: SimpleMemBenchScore,
+            score: SimpleMrqBenchScore,
             max_seq_len: int,
             interaction_len: int,
-            tokenizer_config: MemBenchTokenizerConfig,
+            tokenizer_config: MrqBenchTokenizerConfig,
             sampler_config: Optional[SamplerConfig] = None,
             use_amp: bool = False,
             dtype: torch.dtype = torch.float32,
@@ -39,7 +36,6 @@ class MemBenchRunner:
     ):
         self.score = score
         self.device = device
-
 
         # Batch Sampler for answer generation
         self.generator = None
@@ -60,22 +56,10 @@ class MemBenchRunner:
         self.interaction_len = interaction_len
 
         # Dynamic fields, updated for each curriculum step
-        self.steps = steps
         self.dataset = None
-        self.teacher_forcing = True
-        self.current_step = None
+        self.teacher_forcing = teacher_forcing
         self.model = None
 
-
-    def _init_steps(self):
-        return {
-            'collect': 0,
-            'train': 0,
-            'eval': 0,
-        }
-
-    def _increment_steps(self, step_type: str):
-        self.current_step[step_type] += 1
 
     def encode_and_update_stm(self, query: TokenizedDict, answer: TokenizedDict):
         """Encode interaction and update STM."""
@@ -85,14 +69,14 @@ class MemBenchRunner:
                 # 2. Concatenate batch of queries and answers (they are already on training device)
                 inputs = smart_concat(query, answer, self.interaction_len, self.pad_token_id)
                 # 3. Encode data and update STM
-                self.model(inputs['input_ids'], attention_mask=inputs['attention_mask'], action=RxTMemBenchAction.UPDATE)
+                self.model(inputs['input_ids'], attention_mask=inputs['attention_mask'], action=RxTMrqBenchAction.UPDATE)
         else:
             # 2. Concatenate batch of queries and answers (they are already on training device)
             inputs = smart_concat(query, answer, self.interaction_len, self.pad_token_id)
             # 3. Encode data and update STM
-            self.model(inputs['input_ids'], attention_mask=inputs['attention_mask'], action=RxTMemBenchAction.UPDATE)
+            self.model(inputs['input_ids'], attention_mask=inputs['attention_mask'], action=RxTMrqBenchAction.UPDATE)
 
-    def generate_answer(self, query: TokenizedDict) -> TokenizedDict:
+    def generate_answer(self, query: TokenizedDict, timing_log: list[dict[str, float]]) -> TokenizedDict:
         """Generate response using batch sampler with decoder."""
         # 1. Generate answer with BatchSampler - with autocast on/off
         if self.use_amp:
@@ -102,6 +86,7 @@ class MemBenchRunner:
                     query['attention_mask'],
                     max_gen_len=self.interaction_len,
                     dtype=self.dtype,
+                    timing_log=timing_log,
                     **self.sampler_config,
                 )
         else:
@@ -110,6 +95,7 @@ class MemBenchRunner:
                 query['attention_mask'],
                 max_gen_len=self.interaction_len,
                 dtype=self.dtype,
+                timing_log=timing_log,
                 **self.sampler_config,
             )
         # 2. Convert generated answer to TokenizedDict
@@ -120,40 +106,28 @@ class MemBenchRunner:
 
         return generated_answer
 
-    def _calculate_score(
-            self, generated: TokenizedDict, reference: TokenizedDict, saved_query: TokenizedDict,
-            saved_answer: TokenizedDict, prev_data: tuple[TokenizedDict, TokenizedDict] = None
-    ):
-        saved_interaction = smart_concat(
-            saved_query, saved_answer, max_length=self.max_seq_len, pad_token_id=self.pad_token_id
-        )
-        prev_data = smart_concat(prev_data[0], prev_data[1], self.max_seq_len,
-                                 self.pad_token_id) if prev_data is not None else None
-        scoring = self.score(generated, reference, saved_interaction, prev_data=prev_data)
-        return scoring, saved_interaction
-
     def compute_score(
             self, generated: TokenizedDict, reference: TokenizedDict, saved_data: tuple[TokenizedDict, TokenizedDict],
             prev_data: tuple[TokenizedDict, TokenizedDict] = None
-    ) -> SimpleMemBenchScoreDict:
+    ) -> SimpleMrqBenchScoreDict:
         """Compute reward based on memory retention (e.g., BLEU-4)."""
         # 1. Move sequences to GPU for reward calculation
         saved_query, saved_answer = self._move_multiple_batches(*saved_data)
         reference = self._move_batch(reference)
         prev_data = self._move_multiple_batches(*prev_data) if prev_data is not None else None
 
+        saved_interaction = smart_concat(
+            saved_query, saved_answer, max_length=self.interaction_len, pad_token_id=self.pad_token_id
+        )
+        prev_interaction = smart_concat(prev_data[0], prev_data[1], self.interaction_len,
+                                 self.pad_token_id) if prev_data is not None else None
+
         # 2. Concat saved (previous) interaction and calculate reward using generated sequence, reference and saved data - with autocast on/off
         if self.use_amp:
             with torch.amp.autocast(device_type=self.device.type, dtype=self.dtype):
-                scoring, _ = self._calculate_score(
-                    generated, reference, saved_query, saved_answer,
-                    prev_data=prev_data
-                )
+                scoring = self.score(generated, reference, saved_interaction, prev_data=prev_interaction)
         else:
-            scoring, _ = self._calculate_score(
-                generated, reference, saved_query, saved_answer,
-                prev_data=prev_data
-            )
+            scoring = self.score(generated, reference, saved_interaction, prev_data=prev_interaction)
 
         # 4. Return scores for batch
         return scoring
@@ -194,7 +168,7 @@ class MemBenchRunner:
             batch_size=batch_size,
             shuffle=False,
             pin_memory=True,
-            collate_fn=RxlmMemBenchDataset.collate_mrl_batch,
+            collate_fn=RxlmMrqBenchDataset.collate_mrl_batch,
         )
 
     def _llm_loader(self, batch_size: int):
@@ -203,22 +177,23 @@ class MemBenchRunner:
             batch_size=batch_size,
             shuffle=False,
             pin_memory=True,
-            collate_fn=LlmMemBenchDataset.collate_llm_batch,
+            collate_fn=LlmMrqBenchDataset.collate_llm_batch,
         )
 
-    def run_rxlm(self, batch_size: int, epoch: int):
+    def run_rxlm(self, batch_size: int, num_of_examples: int = None):
         # 1. Init evaluation DataLoader
         dataloader = self._rxlm_loader(batch_size)
-        total_reward = torch.tensor(0.0).to(self.device)
-        count = torch.tensor(0).to(self.device)
-
         self.model.eval()
 
+        results = []
+
         # 2. Run evaluation on all batch episodes
-        for batch in dataloader:
+        for batch_idx, batch in enumerate(dataloader):
             with torch.no_grad():
+                if num_of_examples is not None:
+                    if batch_idx >= num_of_examples:
+                        break
                 if batch['query']['input_ids'].size(0) == batch_size:
-                    self._increment_steps('eval')
                     # 3. Reset STM with random resets ratio and reward model running mean
                     self.model.reset_memory()
                     self.score.reset_running_mean()
@@ -232,16 +207,17 @@ class MemBenchRunner:
                     # 6. Save follow-up interactions len and first query and answer as previous one for iteration
                     interactions_len = len(interactions)
                     query, answer = first_query, first_answer
-                    episode_reward = torch.tensor(0.0).to(self.device)
-                    episode_interactions = torch.tensor(0).to(self.device)
 
                     prev_interaction = None
+
+                    episode_results: list[SimpleMrqBenchScoreDict] = []
+                    timing_log: list[dict[str, float]] = []
 
                     # 7. Run all follow-up interactions
                     for i, interaction in enumerate(interactions):
                         # 8. Generate batch of answers
                         next_query = self._move_batch(interaction['query'])
-                        generated_answer = self.generate_answer(next_query)
+                        generated_answer = self.generate_answer(next_query, timing_log)
 
                         is_last_interaction = (i + 1) == interactions_len
 
@@ -252,6 +228,11 @@ class MemBenchRunner:
                             detached_answer, interaction['answer'], (query, answer), prev_data=prev_interaction
                         )
 
+                        print(f'Step: {i + 1}. Mean reward: {scoring['score']['mean'].item()} / Min reward: {scoring['score']['min'].item()} / Max reward: {scoring['score']['max'].item()}')
+                        print(f'Step: {i + 1}. Mean BLEU: {scoring['bleu']['mean'].item()} Mean Cosine: {scoring['cosine']['mean'].item()}')
+
+                        episode_results.append(scoring)
+
                         # 10. Encode and update memory for the next interaction
                         if not is_last_interaction:
                             self.encode_and_update_stm(
@@ -259,62 +240,66 @@ class MemBenchRunner:
                                 self._move_batch(interaction['answer']) if self.teacher_forcing else generated_answer
                             )
 
-                        # 11. Accumulate rewards
-                        step_score = scoring['score']['mean']
-                        # total
-                        total_reward += step_score
-                        count += 1
-                        # episode
-                        episode_reward += step_score
-                        episode_interactions += 1
                         # 12. Save previous interaction
                         prev_interaction = (query, answer)
                         query, answer = interaction['query'], (interaction['answer'] if self.teacher_forcing else self._cpu_detach(generated_answer))
 
-                    avg_episode_reward = (episode_reward / episode_interactions).item()
+                    batch_mean_scores = torch.stack([item['score']['all'] for item in episode_results]).transpose(0, 1).mean(dim=-1)
 
-                    # 14. Run "on eval episode end" callbacks
-                    for cb in self.callbacks:
-                        cb.on_eval_episode_end(self.actor, epoch, self.epoch_step['eval'], avg_episode_reward)
+                    episode = {
+                        'scores': episode_results,
+                        'mean_score': torch.stack([item['score']['mean'] for item in episode_results]).mean(),
+                        'all': batch_mean_scores,
+                        'mean': batch_mean_scores.mean(),
+                        'max': batch_mean_scores.max(),
+                        'min': batch_mean_scores.min(),
+                        'timing': timing_log,
+                    }
+                    results.append(episode)
+
+                    print(
+                        f'Mean episode reward: {episode["mean_score"].item()} | {episode["mean"].item()} / Min episode reward: {episode["min"].item()} / Max episode reward: {episode["max"].item()}')
 
         # 15. Calculate average reward
-        avg_reward = (total_reward / count) if count > 0 else torch.tensor(0.0).to(self.device)
+        avg_score = torch.stack([result['mean_score'] for result in results]).mean() if len(results) > 0 else torch.tensor(0.0)
 
-        avg_reward = avg_reward.item()
+        return {
+            'mean': avg_score.item(),
+            'scores': results,
+        }
 
-        return avg_reward
-
-    def run_llm(self, batch_size: int, epoch: int):
+    def run_llm(self, batch_size: int, num_of_examples: int = None):
         # 1. Init evaluation DataLoader
         dataloader = self._llm_loader(batch_size)
-        total_reward = torch.tensor(0.0).to(self.device)
-        count = torch.tensor(0).to(self.device)
-
         self.model.eval()
 
+        results = []
+
         # 2. Run evaluation on all batch episodes
-        for batch in dataloader:
+        for batch_idx, batch in enumerate(dataloader):
             with torch.no_grad():
+                if num_of_examples is not None:
+                    if batch_idx >= num_of_examples:
+                        break
                 if batch['query']['input_ids'].size(0) == batch_size:
-                    self._increment_steps('eval')
                     self.score.reset_running_mean()
 
                     # 4. Get batches for first queries, answers and all follow-up interactions
                     first_query, first_answer, interactions = batch['query'], batch['answer'], batch['interactions']
 
                     # 6. Save follow-up interactions len and first query and answer as previous one for iteration
-                    interactions_len = len(interactions)
                     query, answer = first_query, first_answer
-                    episode_reward = torch.tensor(0.0).to(self.device)
-                    episode_interactions = torch.tensor(0).to(self.device)
 
                     prev_interaction = None
+
+                    episode_results: list[SimpleMrqBenchScoreDict] = []
+                    timing_log: list[dict[str, float]] = []
 
                     # 7. Run all follow-up interactions
                     for i, interaction in enumerate(interactions):
                         # 8. Generate batch of answers
                         next_context = self._move_batch(interaction['context'])
-                        generated_answer = self.generate_answer(next_context)
+                        generated_answer = self.generate_answer(next_context, timing_log)
 
                         detached_answer = self._batch_detach(generated_answer)
 
@@ -323,49 +308,52 @@ class MemBenchRunner:
                             detached_answer, interaction['answer'], (query, answer), prev_data=prev_interaction
                         )
 
-                        # 11. Accumulate rewards
-                        step_score = scoring['score']['mean']
-                        # total
-                        total_reward += step_score
-                        count += 1
-                        # episode
-                        episode_reward += step_score
-                        episode_interactions += 1
+                        print(f'Step: {i + 1}. Mean reward: {scoring['score']['mean'].item()} / Min reward: {scoring['score']['min'].item()} / Max reward: {scoring['score']['max'].item()}')
+                        print(f'Step: {i + 1}. Mean BLEU: {scoring['bleu']['mean'].item()} Mean Cosine: {scoring['cosine']['mean'].item()}')
+
+                        episode_results.append(scoring)
                         # 12. Save previous interaction
                         prev_interaction = (query, answer)
                         query, answer = interaction['query'], (
                             interaction['answer'] if self.teacher_forcing else self._cpu_detach(generated_answer))
 
-                    avg_episode_reward = (episode_reward / episode_interactions).item()
+                    batch_mean_scores = torch.stack([item['score']['all'] for item in episode_results]).transpose(0, 1).mean(dim=-1)
 
-                    # 14. Run "on eval episode end" callbacks
-                    for cb in self.callbacks:
-                        cb.on_eval_episode_end(self.actor, epoch, self.epoch_step['eval'], avg_episode_reward)
+                    episode = {
+                        'scores': episode_results,
+                        'mean_score': torch.stack([item['score']['mean'] for item in episode_results]).mean(),
+                        'all': batch_mean_scores,
+                        'mean': batch_mean_scores.mean(),
+                        'max': batch_mean_scores.max(),
+                        'min': batch_mean_scores.min(),
+                        'timing': timing_log,
+                    }
+                    results.append(episode)
+
+                    print(f'Mean episode reward: {episode["mean_score"].item()} | {episode["mean"].item()} / Min episode reward: {episode["min"].item()} / Max episode reward: {episode["max"].item()}')
+
 
         # 15. Calculate average reward
-        avg_reward = (total_reward / count) if count > 0 else torch.tensor(0.0).to(self.device)
+        avg_score = torch.stack([result['mean_score'] for result in results]).mean() if len(results) > 0 else torch.tensor(0.0)
 
-        avg_reward = avg_reward.item()
+        return {
+            'mean': avg_score.item(),
+            'scores': results,
+        }
 
-        return avg_reward
 
-
-    def __call__(self, mode: Literal['rxlm', 'llm'], model: Union[DecoderOnlyTransformer, RxTMemBenchModel], batch_size: int):
-        """Start Memory Reinforcement Learning Curriculum."""
-
+    def __call__(self, mode: Literal['rxlm', 'llm'], model: Union[DecoderOnlyTransformer, RxTMrqBenchModel], dataset: Union[RxlmMrqBenchDataset, LlmMrqBenchDataset], batch_size: int, num_of_examples: int = None):
         self.model = model
-        # 2. Init BatchSampler with actor model (we have to run it after DDP init)
-        self.generator = BatchSampler(
+        self.dataset = dataset
+
+        self.generator = MrqBenchBatchSampler(
             self.model, self.device, end_token_id=self.end_token_id, answer_token_id=self.answer_token_id,
             pad_token_id=self.pad_token_id, use_self_attn_cache=True, use_stm_kv_cache=mode=='rxlm', use_first_empty_workaround=False
         )
 
+        if mode == 'rxlm':
+            scores = self.run_rxlm(batch_size, num_of_examples)
+        else:
+            scores = self.run_llm(batch_size, num_of_examples)
 
-
-
-
-
-
-
-
-
+        return scores

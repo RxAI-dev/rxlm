@@ -6,15 +6,15 @@ from typing import Union, Optional, TypeAlias, Any, Literal
 from ..training.dataset import MrlCurriculumDataset
 
 
-class RxlmMemBenchDataset(MrlCurriculumDataset):
+class RxlmMrqBenchDataset(MrlCurriculumDataset):
     pass
 
 
 ItemFields: TypeAlias = Literal['input_ids', 'attention_mask']
-LlmMemBenchDatasetItem: TypeAlias = dict[str, Union[dict[str, torch.Tensor], list[dict[str, dict[str, torch.Tensor]]]]]
+LlmMrqBenchDatasetItem: TypeAlias = dict[str, Union[dict[str, torch.Tensor], list[dict[str, dict[str, torch.Tensor]]]]]
 
 
-class LlmMemBenchDataset(Dataset):
+class LlmMrqBenchDataset(Dataset):
     def __init__(
             self,
             episodes: Union[list[dict], HfDataset],
@@ -30,7 +30,7 @@ class LlmMemBenchDataset(Dataset):
             interaction_len: Optional[int] = None,
             **kwargs,
     ):
-        super(LlmMemBenchDataset, self).__init__(**kwargs)
+        super(LlmMrqBenchDataset, self).__init__(**kwargs)
         self.episodes = episodes
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
@@ -113,7 +113,7 @@ class LlmMemBenchDataset(Dataset):
             **self._tokenize_manual_interaction(current_query, current_answer),
         }
 
-    def get_tokenized_item(self, idx: int, episode: dict = None) -> LlmMemBenchDatasetItem:
+    def get_tokenized_item(self, idx: int, episode: dict = None) -> LlmMrqBenchDatasetItem:
         if self.is_pre_tokenized:
             return self.inputs[idx]
         else:
@@ -131,13 +131,13 @@ class LlmMemBenchDataset(Dataset):
                 'interactions': templates,
             }
 
-    def __getitem__(self, idx: int) -> LlmMemBenchDatasetItem:
+    def __getitem__(self, idx: int) -> LlmMrqBenchDatasetItem:
         return self.get_tokenized_item(idx)
 
     def __len__(self) -> int:
         return len(self.inputs if self.is_pre_tokenized else self.episodes)
 
-    def get_subset(self, size: float, from_start: bool = False, **kwargs) -> "LlmMemBenchDataset":
+    def get_subset(self, size: float, from_start: bool = False, **kwargs) -> "LlmMrqBenchDataset":
         split_point = int(len(self.inputs if self.is_pre_tokenized else self.episodes) * ((1 - size) if not from_start else size))
         if not isinstance(self.episodes, list):
             subset = self.episodes.select(
@@ -217,7 +217,7 @@ class LlmMemBenchDataset(Dataset):
                    interactions_field=interactions_field, max_seq_len=max_seq_len, **kwargs)
 
     @staticmethod
-    def collate_llm_batch(batch: list[LlmMemBenchDatasetItem]) -> LlmMemBenchDatasetItem:
+    def collate_llm_batch(batch: list[LlmMrqBenchDatasetItem]) -> LlmMrqBenchDatasetItem:
         """Collate function for MRL curriculum dataset with nested interactions"""
 
         def collate_first_interaction_batch(interaction_batch: Union[list[dict[str, dict[str, torch.Tensor]]], tuple[Any]]) -> \

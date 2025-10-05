@@ -2,18 +2,18 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
-from enum import Enum
 from typing import Optional, Literal, TypeAlias, Union
 from ..training.utils import TokenizedDict
+from ..metrics.tensorbleu import tensor_sentence_bleu
 
 
-SimpleMemBenchScoreDict: TypeAlias = dict[
+SimpleMrqBenchScoreDict: TypeAlias = dict[
     Literal['bleu', 'cosine', 'length', 'raw', 'score'], dict[
         Literal['all', 'mean', 'max', 'min'], torch.Tensor
     ]
 ]
 
-class SimpleMemBenchScore:
+class SimpleMrqBenchScore:
     def __init__(
             self,
             shared_embedding: nn.Embedding,
@@ -39,6 +39,8 @@ class SimpleMemBenchScore:
             bleu_ref_weights: tuple = (0.5, 0.5),
             rewards_scale: float = 1.0,
             debug_mode: int = 0,
+            use_tensor_bleu: bool = False,
+            tensor_bleu_smoothing: Literal['none', 'floor', 'add-k', 'exp'] = 'exp',
     ):
         self.shared_embedding = shared_embedding
         self.bleu_mode = bleu_mode
@@ -64,6 +66,8 @@ class SimpleMemBenchScore:
         self.rewards_scale = rewards_scale
         self.bleu_smoothing = SmoothingFunction().method4
         self.debug_mode = debug_mode
+        self.use_tensor_bleu = use_tensor_bleu
+        self.tensor_bleu_smoothing = tensor_bleu_smoothing
 
         self.prev_data_running_mean = None
 
@@ -99,7 +103,10 @@ class SimpleMemBenchScore:
                 weights=self.bleu_ref_weights, smoothing_function=self.bleu_smoothing
             )
 
-    def batch_bleu(self, generated: TokenizedDict, reference: TokenizedDict, saved_data: TokenizedDict, is_first_step: bool = False) -> list[float]:
+    def batch_bleu(self, generated: TokenizedDict, reference: TokenizedDict, saved_data: TokenizedDict, is_first_step: bool = False) -> Union[list[float], torch.Tensor]:
+        if self.use_tensor_bleu:
+          return self.batch_tensor_bleu(generated, reference, saved_data, is_first_step)
+
         batch_size = generated['input_ids'].size(0)
 
         return [
@@ -109,6 +116,28 @@ class SimpleMemBenchScore:
                 is_first_step=is_first_step,
             ) for i in range(batch_size)
         ]
+
+    def batch_tensor_bleu(self, generated: TokenizedDict, reference: TokenizedDict, saved_data: TokenizedDict, is_first_step: bool = False) -> torch.Tensor:
+        if self.bleu_mode == 'separate':
+            ref_bleu = tensor_sentence_bleu(
+                generated['input_ids'], reference['input_ids'].unsqueeze(1),
+                weights=torch.tensor(self.bleu_ref_weights), smoothing_method=self.tensor_bleu_smoothing
+            )
+            saved_bleu = tensor_sentence_bleu(
+                generated['input_ids'], saved_data['input_ids'].unsqueeze(1),
+                weights=torch.tensor(self.bleu_saved_weights), smoothing_method=self.tensor_bleu_smoothing
+            )
+
+            if is_first_step:
+                return self.bleu_first_ref_factor * ref_bleu + self.bleu_first_saved_factor * saved_bleu
+            else:
+                return self.bleu_ref_factor * ref_bleu + self.bleu_saved_factor * saved_bleu
+        else:
+            device = generated['input_ids'].device
+            return tensor_sentence_bleu(
+                generated['input_ids'], torch.tensor([reference['input_ids'], saved_data['input_ids']]).to(device),
+                weights=torch.tensor(self.bleu_ref_weights), smoothing_method=self.tensor_bleu_smoothing
+            )
 
     def _sequence_embedding(self, sequence: TokenizedDict) -> torch.Tensor:
         input_ids = sequence['input_ids']
@@ -182,7 +211,7 @@ class SimpleMemBenchScore:
             reference: TokenizedDict,
             saved_data: TokenizedDict,
             prev_data: TokenizedDict = None,
-    ) -> SimpleMemBenchScoreDict:
+    ) -> SimpleMrqBenchScoreDict:
         if prev_data is not None:
             if self.prev_data_running_mean is None:
                 self.init_running_mean(prev_data)
@@ -195,7 +224,7 @@ class SimpleMemBenchScore:
         cosine = self.batch_cosine(generated, reference, saved_data, include_running_mean=prev_data is not None)
         len_reward = self.len_reward(generated, reference)
 
-        tensor_bleu = torch.tensor(bleu, device=device)
+        tensor_bleu = torch.tensor(bleu, device=device) if not self.use_tensor_bleu else bleu
 
         raw_score = self.bleu_factor * tensor_bleu + self.cos_factor * cosine + self.len_factor * len_reward
         scaled_score = raw_score * self.rewards_scale

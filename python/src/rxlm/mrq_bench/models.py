@@ -14,12 +14,12 @@ RxTMemoryAttentionType: TypeAlias = Union[
 ]
 
 
-class RxTMemBenchAction(Enum):
+class RxTMrqBenchAction(Enum):
     DECODE = 1
     UPDATE = 2
 
 
-class RxTMemBenchModel(nn.Module):
+class RxTMrqBenchModel(nn.Module):
     def __init__(
             self,
             encoder: RxTEncoder,
@@ -27,7 +27,7 @@ class RxTMemBenchModel(nn.Module):
             memory_attention: RxTMemoryAttentionType,
             **kwargs
     ):
-        super(RxTMemBenchModel, self).__init__(**kwargs)
+        super(RxTMrqBenchModel, self).__init__(**kwargs)
         self.encoder = encoder
         self.decoder = decoder
         self.memory_attention = memory_attention
@@ -65,9 +65,9 @@ class RxTMemBenchModel(nn.Module):
             stm_kv_cache: list[tuple[torch.Tensor, torch.Tensor]] = None,
             use_self_attn_cache: bool = False,
             current_positions: torch.Tensor = None,
-            action: RxTMemBenchAction = RxTMemBenchAction.DECODE
+            action: RxTMrqBenchAction = RxTMrqBenchAction.DECODE
     ) -> torch.Tensor:
-        if action == RxTMemBenchAction.DECODE:
+        if action == RxTMrqBenchAction.DECODE:
             return self.decoder(x, attention_mask=attention_mask, stm_kv_cache=stm_kv_cache, use_self_attn_cache=use_self_attn_cache, current_positions=current_positions)
         else:
             _, ed = self.encoder(x, attention_mask=attention_mask)
