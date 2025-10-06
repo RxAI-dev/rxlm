@@ -1,6 +1,6 @@
 import torch
-from torch.utils.data import Dataset
-from datasets import Dataset as HfDataset, load_dataset, concatenate_datasets
+from torch.utils.data import Dataset, IterableDataset
+from datasets import Dataset as HfDataset, load_dataset, concatenate_datasets, IterableDataset as HfIterableDataset
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from .tokenizer import load_tokenizer_from_hf_hub
 
@@ -1191,3 +1191,112 @@ class MrlDatasets:
         mrl_datasets = [dataset_item(item) for item in mrl_curriculum_steps]
 
         return cls(mrl_datasets)
+
+
+class BaseIterableDataset(IterableDataset):
+    def __init__(
+            self,
+            hf_iterable_dataset: HfIterableDataset,
+            tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+            max_seq_len: int = 1024,
+            hf_field: str = 'text',
+            **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.hf_dataset = hf_iterable_dataset
+        self.tokenizer = tokenizer
+        self.max_seq_len = max_seq_len
+        self.hf_field = hf_field
+
+    def tokenize_text(self, text: str):
+        inputs = self.tokenizer(
+            text,
+            max_length=self.max_seq_len,
+            truncation=True,
+            padding='max_length',
+            return_tensors='pt',
+            return_attention_mask=True
+        )
+
+        input_ids = inputs['input_ids'][0]
+        vocab_size = self.tokenizer.vocab_size
+        unk_token_id = self.tokenizer.unk_token_id
+
+        input_ids[input_ids >= vocab_size] = unk_token_id
+        input_ids[input_ids < 0] = unk_token_id
+
+        return inputs
+
+    def __iter__(self):
+        for example in self.hf_dataset:
+            text = example[self.hf_field]
+            yield self.tokenize_text(text)
+
+    @classmethod
+    def from_hf_hub(
+            cls,
+            dataset_id: str,
+            subset: str = None,
+            split: str = 'train',
+            target_field: str = 'text',
+            tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast] = None,
+            tokenizer_hub_id: str = None,
+            max_seq_len: int = 1024,
+            load_kwargs: dict = None,
+            load_tokenizer_kwargs: dict = None,
+            **kwargs
+    ):
+        assert tokenizer is not None or tokenizer_hub_id is not None, "Musisz podać `tokenizer` lub `tokenizer_hub_id`."
+
+        if load_kwargs is None: load_kwargs = {}
+        if load_tokenizer_kwargs is None: load_tokenizer_kwargs = {}
+
+        if tokenizer is None:
+            tokenizer = load_tokenizer_from_hf_hub(tokenizer_hub_id, **load_tokenizer_kwargs)
+
+        hf_dataset = load_dataset(dataset_id, name=subset, split=split, streaming=True, **load_kwargs)
+
+        return cls(hf_dataset, tokenizer, max_seq_len=max_seq_len, hf_field=target_field, **kwargs)
+
+
+class JointLMIterableDataset(BaseIterableDataset):
+    def __init__(
+            self,
+            hf_iterable_dataset: HfIterableDataset,
+            tokenizer: PreTrainedTokenizer,
+            max_seq_len: int = 1024,
+            mask_prob: float = 0.15,
+            hf_field: str = 'text',
+            **kwargs
+    ):
+        super().__init__(hf_iterable_dataset, tokenizer, max_seq_len, hf_field, **kwargs)
+        self.mask_prob = mask_prob
+
+    def __iter__(self):
+        tokenized_iterator = super().__iter__()
+
+        for tokenized_inputs in tokenized_iterator:
+            encoder_input_ids = tokenized_inputs['input_ids'][0].clone()
+            attention_mask = tokenized_inputs['attention_mask'][0]
+            decoder_input_ids = encoder_input_ids.clone()
+            decoder_targets = encoder_input_ids.clone()
+
+            masked_indices = torch.bernoulli(
+                torch.full(encoder_input_ids.shape, self.mask_prob)
+            ).bool() & attention_mask.bool()
+
+            encoder_labels = encoder_input_ids.clone()
+            encoder_labels[~masked_indices] = -100
+            encoder_input_ids[masked_indices] = self.tokenizer.mask_token_id
+
+            yield {
+                'decoder': {
+                    'input_ids': decoder_input_ids,
+                    'targets': decoder_targets,
+                },
+                'encoder': {
+                    'input_ids': encoder_input_ids,
+                    'labels': encoder_labels,
+                },
+                'attention_mask': attention_mask,
+            }

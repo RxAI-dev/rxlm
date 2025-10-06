@@ -864,7 +864,7 @@ class RxTAlphaTokenizerConfig(TypedDict):
     query_token_id: int
     pad_token_id: int
 
-class RxTAlphaForwardAction(Enum):
+class RxTForwardAction(Enum):
     DECODE = 1
     UPDATE = 2
 
@@ -1028,9 +1028,9 @@ class RxTAlpha(nn.Module, PyTorchModelHubMixin, pipeline_tag="text-generation", 
             stm_kv_cache: list[tuple[torch.Tensor, torch.Tensor]] = None,
             use_self_attn_cache: bool = False,
             current_positions: Optional[torch.Tensor] = None,
-            action: RxTAlphaForwardAction = RxTAlphaForwardAction.DECODE
+            action: RxTForwardAction = RxTForwardAction.DECODE
     ) -> torch.Tensor:
-        if action == RxTAlphaForwardAction.DECODE:
+        if action == RxTForwardAction.DECODE:
             return self.decoder(input_ids, attention_mask=attention_mask, stm_kv_cache=stm_kv_cache, use_self_attn_cache=use_self_attn_cache, current_positions=current_positions)
         else:
             _, ed = self.encoder(input_ids, attention_mask=attention_mask)
@@ -1052,7 +1052,7 @@ class RxTAlpha(nn.Module, PyTorchModelHubMixin, pipeline_tag="text-generation", 
         # Forward pass to get next token logits
         outputs = self.forward(
             input_ids[:, -1] if not init_step else input_ids, attention_mask=attention_mask[:, -1] if not init_step else attention_mask, stm_kv_cache=stm_kv_cache,
-            use_self_attn_cache=use_self_attn_cache, action=RxTAlphaForwardAction.DECODE, current_positions=torch.tensor([[input_ids.size(-1)]]).to(input_ids.device) if not init_step else None
+            use_self_attn_cache=use_self_attn_cache, action=RxTForwardAction.DECODE, current_positions=torch.tensor([[input_ids.size(-1)]]).to(input_ids.device) if not init_step else None
         )
         next_token_logits = outputs[:, -1, :]  # Get logits for next token
         # Apply sampling
@@ -1104,7 +1104,7 @@ class RxTAlpha(nn.Module, PyTorchModelHubMixin, pipeline_tag="text-generation", 
                     break
 
             yield -1 # start memory update
-            self.forward(input_ids, attention_mask=attention_mask, action=RxTAlphaForwardAction.UPDATE) # input_ids and attention_mask are already accumulated
+            self.forward(input_ids, attention_mask=attention_mask, action=RxTForwardAction.UPDATE) # input_ids and attention_mask are already accumulated
             yield -2 # finished memory update
 
     def batch_interact(
@@ -1153,7 +1153,7 @@ class RxTAlpha(nn.Module, PyTorchModelHubMixin, pipeline_tag="text-generation", 
                     masks = working_mask[:, :max_len]
 
                     logits = self.forward(
-                        inputs, attention_mask=masks, action=RxTAlphaForwardAction.DECODE,
+                        inputs, attention_mask=masks, action=RxTForwardAction.DECODE,
                         stm_kv_cache=stm_kv_cache, use_self_attn_cache=use_self_attn_cache,
                         current_positions=None
                     )
@@ -1168,7 +1168,7 @@ class RxTAlpha(nn.Module, PyTorchModelHubMixin, pipeline_tag="text-generation", 
                     masks = torch.where(finished_tokens == 0, selected_masks, self.pad_token_id)
 
                     logits = self.forward(
-                        inputs, attention_mask=masks, action=RxTAlphaForwardAction.DECODE,
+                        inputs, attention_mask=masks, action=RxTForwardAction.DECODE,
                         stm_kv_cache=stm_kv_cache, use_self_attn_cache=use_self_attn_cache,
                         current_positions=indices
                     )
@@ -1204,7 +1204,7 @@ class RxTAlpha(nn.Module, PyTorchModelHubMixin, pipeline_tag="text-generation", 
 
             yield torch.full((batch_size,), -1, dtype=torch.long) # start memory update
             # Update memory
-            self.forward(working_ids, attention_mask=working_mask, action=RxTAlphaForwardAction.UPDATE)
+            self.forward(working_ids, attention_mask=working_mask, action=RxTForwardAction.UPDATE)
             yield torch.full((batch_size,), -2, dtype=torch.long) # finished memory update
 
 
@@ -1255,7 +1255,7 @@ class RxTAlpha(nn.Module, PyTorchModelHubMixin, pipeline_tag="text-generation", 
                     masks = working_mask[:, :max_len]
 
                     logits = self.forward(
-                        inputs, attention_mask=masks, action=RxTAlphaForwardAction.DECODE,
+                        inputs, attention_mask=masks, action=RxTForwardAction.DECODE,
                         stm_kv_cache=stm_kv_cache, use_self_attn_cache=use_self_attn_cache,
                         current_positions=None
                     )
@@ -1270,7 +1270,7 @@ class RxTAlpha(nn.Module, PyTorchModelHubMixin, pipeline_tag="text-generation", 
                     masks = torch.where(finished_tokens == 0, selected_masks, self.pad_token_id)
 
                     logits = self.forward(
-                        inputs, attention_mask=masks, action=RxTAlphaForwardAction.DECODE,
+                        inputs, attention_mask=masks, action=RxTForwardAction.DECODE,
                         stm_kv_cache=stm_kv_cache, use_self_attn_cache=use_self_attn_cache,
                         current_positions=indices
                     )
@@ -1303,7 +1303,7 @@ class RxTAlpha(nn.Module, PyTorchModelHubMixin, pipeline_tag="text-generation", 
                 finished |= (next_tokens == self.end_token_id) & active_mask
 
             # Update memory
-            self.forward(working_ids, attention_mask=working_mask, action=RxTAlphaForwardAction.UPDATE)
+            self.forward(working_ids, attention_mask=working_mask, action=RxTForwardAction.UPDATE)
 
             if return_interactions_with_queries:
                 return working_ids, working_mask
@@ -1320,3 +1320,24 @@ class RxTAlpha(nn.Module, PyTorchModelHubMixin, pipeline_tag="text-generation", 
                         generated_mask[i, :gen_len] = working_mask[i, start-1:end] # -1 to include [A] token
 
                 return generated_ids, generated_mask
+
+
+class RxTBeta(RxTAlpha):
+    def __init__(
+            self,
+            decoder_config: RxTComponentConfig,
+            encoder_config: RxTComponentConfig,
+            memory_attention_config: RxTInterlayerMemoryAttentionConfig,
+            tokenizer_config: RxTAlphaTokenizerConfig,
+            tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast] = None,
+            **kwargs,
+    ):
+        super(RxTBeta, self).__init__(
+            decoder_config=decoder_config,
+            encoder_config=encoder_config,
+            memory_attention_config=memory_attention_config,
+            tokenizer_config=tokenizer_config,
+            tokenizer=tokenizer,
+            memory_attention_variant='self-interlayer',
+            **kwargs
+        )

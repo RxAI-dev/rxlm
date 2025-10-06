@@ -42,8 +42,8 @@ def tensor_sentence_bleu(
     reference_lengths = reference_mask.sum(dim=2)
 
     # Track numerators and denominators per sentence
-    numerators = torch.zeros(batch_size, max_n, device=candidates.device)
-    denominators = torch.zeros(batch_size, max_n, device=candidates.device)
+    numerators = torch.zeros(batch_size, max_n, device=candidates.device, dtype=torch.long)
+    denominators = torch.zeros(batch_size, max_n, device=candidates.device, dtype=torch.long)
 
     for n in range(1, max_n + 1):
         # Skip sentences that are too short for this n-gram order
@@ -208,8 +208,8 @@ def tensor_corpus_bleu(
     candidate_lengths = candidate_mask.sum(dim=1)
     reference_lengths = reference_mask.sum(dim=2)
 
-    numerators = torch.zeros(max_n, device=candidates.device)
-    denominators = torch.zeros(max_n, device=candidates.device)
+    numerators = torch.zeros(max_n, device=candidates.device, dtype=torch.long)
+    denominators = torch.zeros(max_n, device=candidates.device, dtype=torch.long)
 
     for n in range(1, max_n + 1):
         if torch.any(candidate_lengths < n):
