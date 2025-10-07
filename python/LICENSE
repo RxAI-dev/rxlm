@@ -2,7 +2,7 @@
 
 **Effective Date:** September 20, 2025
 
-**Copyright (c) 2025 Reactive AI. All rights reserved.**
+**Copyright (c) 2025 Reactive AI, Adam Filipek. All rights reserved.**
 
 This Reactive AI Framework License ("License") governs the use of the Reactive Language Models (RxLM - part of RxNN platform) software framework, its source code, binaries, documentation, and any associated materials (collectively, the "Software"). By using, copying, modifying, or distributing the Software, you ("Licensee") agree to all of the terms and conditions of this License.
 
