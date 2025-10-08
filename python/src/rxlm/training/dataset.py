@@ -268,7 +268,7 @@ class BaseDataset(Dataset):
             max_seq_len: int = 1024,
             load_kwargs: dict = None,
             load_tokenizer_kwargs: dict = None,
-            valid_size: float = 0.1,
+            valid_size: Union[float, tuple[int]] = 0.1,
             **kwargs
     ):
         """
@@ -309,7 +309,10 @@ class BaseDataset(Dataset):
             load_dataset(dataset_id, split=split, **load_kwargs) for dataset_id in dataset_ids
         ]
 
-        hf_ds_dicts = [dataset.train_test_split(test_size=valid_size) for dataset in hf_datasets]
+        if isinstance(valid_size, float):
+            hf_ds_dicts = [dataset.train_test_split(test_size=valid_size) for dataset in hf_datasets]
+        else:
+            hf_ds_dicts = [dataset.train_test_split(test_size=valid_size[i]) for i, dataset in enumerate(hf_datasets)]
 
         hf_dataset = concatenate_datasets([ds_dict['train'] for ds_dict in hf_ds_dicts])
         hf_valid_dataset = concatenate_datasets([ds_dict['test'] for ds_dict in hf_ds_dicts])

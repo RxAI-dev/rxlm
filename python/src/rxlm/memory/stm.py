@@ -67,8 +67,9 @@ class ShortTermMemory(nn.Module):
 
     def resize(self, new_stm_size: int, init_type: str = None):
         self.stm_size = new_stm_size
+        device = self.memory.device
         delattr(self, 'memory')
-        self.register_buffer('memory', self._init_tensor(init_type))
+        self.register_buffer('memory', self._init_tensor(init_type).to(device))
 
     def batched_memory(self, batch_size: int, init_type: str = None):
         if init_type is not None:
