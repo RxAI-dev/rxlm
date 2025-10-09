@@ -4,7 +4,6 @@ import os
 
 from abc import ABC, abstractmethod
 
-from poetry.console.commands import self
 from torch.utils.tensorboard import SummaryWriter
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
