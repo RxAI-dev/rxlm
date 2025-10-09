@@ -64,8 +64,6 @@ class SupervisedMemoryAttentionTrainer(BaseTrainer):
             if not self.is_running:
                 break
             else:
-                for callback in self.callbacks:
-                    callback.on_batch_start(self.model, batch_idx, batch)
                 if self.get_batch_size(batch) == batch_size:
                     self.total_steps += 1
                     self.epoch_steps = batch_idx
@@ -468,8 +466,6 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
             if not self.is_running:
                 break
             else:
-                for callback in self.callbacks:
-                    callback.on_batch_start(self.model, batch_idx, batch)
                 if self.get_batch_size(batch) == batch_size:
                     self.total_steps += 1
                     self.epoch_steps = batch_idx

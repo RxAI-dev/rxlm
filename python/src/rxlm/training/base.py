@@ -3,6 +3,8 @@ import math
 import os
 
 from abc import ABC, abstractmethod
+
+from poetry.console.commands import self
 from torch.utils.tensorboard import SummaryWriter
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
@@ -30,6 +32,7 @@ class BaseTrainer(ABC):
             tensorboard_interval: int = 10,
             dataset_collate_fn: Callable[[list[Any]], dict[str, Any]] = None,
             use_iterable_dataset: bool = False,
+            num_dataloader_workers: int = 0,
     ):
         if get_batch_size is None:
             self.get_batch_size = lambda batch: batch['attention_mask'].size(0)
@@ -66,6 +69,7 @@ class BaseTrainer(ABC):
         self.tensorboard_interval = tensorboard_interval
         self.dataset_collate_fn = dataset_collate_fn
         self.use_iterable_dataset = use_iterable_dataset
+        self.num_dataloader_workers = num_dataloader_workers
 
     @abstractmethod
     def compute_loss(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
@@ -106,13 +110,14 @@ class BaseTrainer(ABC):
             rank, world_size = get_os_ddp_config()
             dist.init_process_group(backend='nccl', rank=rank, world_size=world_size)
             self.model = DistributedDataParallel(self.model, device_ids=[self.device.index], find_unused_parameters=ddp_find_unused_parameters)
-            train_sampler = torch.utils.data.DistributedSampler(dataset, shuffle=not self.use_iterable_dataset)
+            train_sampler = torch.utils.data.DistributedSampler(dataset, shuffle=not self.use_iterable_dataset, rank=rank, num_replicas=world_size, drop_last=True)
             dataloader = torch.utils.data.DataLoader(
                 dataset,
                 batch_size=batch_size,
                 sampler=train_sampler,
                 pin_memory=True,
                 collate_fn=self.dataset_collate_fn,
+                num_workers=world_size * 4,
             )
         else:
             train_sampler = None
@@ -122,6 +127,7 @@ class BaseTrainer(ABC):
                 shuffle=not self.use_iterable_dataset,
                 pin_memory=True,
                 collate_fn=self.dataset_collate_fn,
+                drop_last=True,
             )
 
         scaler = torch.amp.GradScaler() if self.use_amp else None
@@ -157,78 +163,78 @@ class BaseTrainer(ABC):
         for callback in self.callbacks:
             callback.on_epoch_start(self.model, epoch)
 
-        self.accumulated_loss = 0.0
+        self.accumulated_loss = torch.tensor(0.0, device=self.device)
         self.optimizer_step_count = 0
+
+        accumulated_tokens = torch.tensor(0.0, device=self.device)
 
         for batch_idx, batch in enumerate(dataloader):
             if not self.is_running:
                 break
             else:
-                for callback in self.callbacks:
-                    callback.on_batch_start(self.model, batch_idx, batch)
-                if self.get_batch_size(batch) == batch_size:
-                    self.total_steps += 1
-                    self.epoch_steps = batch_idx
-                    loss = self.train_step(batch, batch_idx)
-                    orig_loss = loss.item()
-                    self.accumulated_loss += orig_loss
-                    loss = loss / self.gradient_accumulation_steps
+                self.total_steps += 1
+                self.epoch_steps = batch_idx
+                accumulated_tokens += batch['attention_mask'].sum()
+                loss = self.train_step(batch, batch_idx)
+                self.accumulated_loss += loss
+                loss = loss / self.gradient_accumulation_steps
 
+                if self.use_amp:
+                    scaler.scale(loss).backward()
+                else:
+                    loss.backward()
+
+                self.optimizer_step_count += 1
+                if self.optimizer_step_count % self.gradient_accumulation_steps == 0:
+                    # Clip gradients after accumulation
                     if self.use_amp:
-                        scaler.scale(loss).backward()
+                        scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0, error_if_nonfinite=False)
+                    if self.use_amp:
+                        scaler.step(optimizer)
+                        scaler.update()
                     else:
-                        loss.backward()
+                        optimizer.step()
 
-                    self.optimizer_step_count += 1
-                    if self.optimizer_step_count % self.gradient_accumulation_steps == 0:
-                        # Clip gradients after accumulation
-                        if self.use_amp:
-                            scaler.unscale_(optimizer)
-                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0, error_if_nonfinite=False)
-                        if self.use_amp:
-                            scaler.step(optimizer)
-                            scaler.update()
-                        else:
-                            optimizer.step()
+                    optimizer.zero_grad()
 
-                        optimizer.zero_grad()
+                    if scheduler is not None:
+                        scheduler.step()
 
-                        if scheduler is not None:
-                            scheduler.step()
 
-                        if self.writer and self.total_steps % self.tensorboard_interval == 0:
-                            loss_item = self.accumulated_loss / self.gradient_accumulation_steps
-                            self.writer.add_scalar(
-                                'Loss/train',
-                                loss_item,
-                                self.total_steps,
-                            )
-                            self.writer.add_scalar(
-                                'Loss/train last epoch',
-                                loss_item,
-                                batch_idx
-                            )
-                            self.writer.add_scalar(
-                                'Perplexity/train',
-                                torch.exp(torch.tensor(loss_item)),
-                                self.total_steps,
-                            )
+                    if self.writer and self.total_steps % self.tensorboard_interval == 0:
+                        loss_item = (self.accumulated_loss / self.gradient_accumulation_steps).item()
+                        self.writer.add_scalar(
+                            'Loss/train',
+                            loss_item,
+                            self.total_steps,
+                        )
+                        self.writer.add_scalar(
+                            'Loss/train last epoch',
+                            loss_item,
+                            batch_idx
+                        )
+                        self.writer.add_scalar(
+                            'Perplexity/train',
+                            torch.exp(torch.tensor(loss_item)),
+                            self.total_steps,
+                        )
 
-                        self.accumulated_loss = 0.0
-                        self.optimizer_step_count = 0
-
-                    if self.writer:
-                        self.total_tokens += batch['attention_mask'].sum().item()
+                        self.total_tokens += accumulated_tokens.item()
+                        accumulated_tokens = torch.tensor(0.0, device=self.device)
                         self.writer.add_scalar(
                             'Processed tokens',
                             self.total_tokens,
                             self.total_steps
                         )
 
-                    for callback in self.callbacks:
-                        should_stop = callback.on_batch_end(self.model, batch_idx, orig_loss, batch)
-                        if should_stop:
-                            self.is_running = False
+                    self.accumulated_loss = torch.tensor(0.0, device=self.device)
+                    self.optimizer_step_count = 0
+
+                for callback in self.callbacks:
+                    should_stop = callback.on_batch_end(self.model, batch_idx, loss, batch)
+                    if should_stop:
+                        self.is_running = False
 
         if self.validation_dataset:
             self.validation_steps = 0

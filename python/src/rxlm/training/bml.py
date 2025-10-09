@@ -85,7 +85,7 @@ class JointLMTrainer(BaseTrainer):
         loss = main_loss + self.moe_aux_loss_scale * router_loss
 
         if self.writer is not None:
-            if self.model.training:
+            if self.model.training and self.total_steps % self.tensorboard_interval == 0:
                 self.writer.add_scalar('Router aux loss/Train', router_loss.item(), self.total_steps)
                 self.writer.add_scalar('Model loss/Train', main_loss.item(), self.total_steps)
             else:

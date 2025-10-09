@@ -16,10 +16,7 @@ class TrainerCallback:
     def on_epoch_end(self, model: nn.Module, epoch: int) -> Union[bool, None]:
         pass
 
-    def on_batch_start(self, model: nn.Module, batch_idx: int, batch: dict[str, torch.Tensor]) -> None:
-        pass
-
-    def on_batch_end(self, model: nn.Module, batch_idx: int, loss: float, batch: dict[str, torch.Tensor]) -> \
+    def on_batch_end(self, model: nn.Module, batch_idx: int, loss: torch.Tensor, batch: dict[str, torch.Tensor]) -> \
             Union[
                 bool, None]:
         pass
@@ -41,16 +38,13 @@ class PrintLossCallback(TrainerCallback):
         self.joint_mode = joint_mode
         self.batches_per_epoch = batches_per_epoch
 
-    def on_batch_start(self, model: nn.Module, batch_idx: int, batch: dict[str, torch.Tensor]) -> None:
-        pass
-
-    def on_batch_end(self, model: nn.Module, batch_idx: int, loss: int,
+    def on_batch_end(self, model: nn.Module, batch_idx: int, loss: torch.Tensor,
                      batch: dict[str, torch.Tensor]) -> None:
         self.batch_group_losses.append(loss)
         self.epoch_losses.append(loss)
 
         if batch_idx != 0 and batch_idx % self.batch_log_interval == 0:
-            batch_group_mean = np.stack(self.batch_group_losses).mean()
+            batch_group_mean = torch.stack(self.batch_group_losses).mean().item()
             self.batch_group_losses = []
             if self.batches_per_epoch is not None:
                 print(
@@ -101,26 +95,28 @@ class PrintMemoryAttentionMetricsCallback(TrainerCallback):
 
 
 class TokenCounterCallback(TrainerCallback):
-    def __init__(self, limit: int, batch_log_interval: int = 100):
-        self.total_tokens = 0
+    def __init__(self, limit: int, batch_log_interval: int = 100, device: torch.device = torch.device('cpu')):
+        self.total_tokens = torch.tensor(0, dtype=torch.long, device=device)
         self.limit = limit
         self.batch_log_interval = batch_log_interval
+        self.device = device
 
-    def on_batch_end(self, model: nn.Module, batch_idx: int, loss: int,
+    def on_batch_end(self, model: nn.Module, batch_idx: int, loss: torch.Tensor,
                      batch: dict[str, torch.Tensor]) -> bool:
-        attention_mask = batch['attention_mask']
-        batch_tokens = attention_mask.sum().item()
+        attention_mask = batch['attention_mask'].to(self.device)
+        batch_tokens = attention_mask.sum()
         self.total_tokens += batch_tokens
         if batch_idx != 0 and batch_idx % self.batch_log_interval == 0:
-            print(f'Total processed tokens: {human_format(self.total_tokens)}')
+            print(f'Total processed tokens: {human_format(self.total_tokens.item())}')
 
-        should_stop_training = self.total_tokens >= self.limit
-        if should_stop_training:
-            print(f'Reached a limit of {human_format(self.limit)} processed tokens - stopping training')
-        return should_stop_training
+            should_stop_training = self.total_tokens >= self.limit
+            if should_stop_training:
+                print(f'Reached a limit of {human_format(self.limit)} processed tokens - stopping training')
+            return should_stop_training.item()
+        return False
 
     def on_training_end(self, model: nn.Module) -> None:
-        print(f'Total training tokens: {human_format(self.total_tokens)}')
+        print(f'Total training tokens: {human_format(self.total_tokens.item())}')
 
     def get_total_tokens(self):
         return self.total_tokens
