@@ -32,6 +32,7 @@ class BaseTrainer(ABC):
             dataset_collate_fn: Callable[[list[Any]], dict[str, Any]] = None,
             use_iterable_dataset: bool = False,
             num_dataloader_workers: int = 0,
+            ddp_shuffle: bool = True,
     ):
         if get_batch_size is None:
             self.get_batch_size = lambda batch: batch['attention_mask'].size(0)
@@ -69,6 +70,7 @@ class BaseTrainer(ABC):
         self.dataset_collate_fn = dataset_collate_fn
         self.use_iterable_dataset = use_iterable_dataset
         self.num_dataloader_workers = num_dataloader_workers
+        self.ddp_shuffle = ddp_shuffle
 
     @abstractmethod
     def compute_loss(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
@@ -109,7 +111,7 @@ class BaseTrainer(ABC):
             rank, world_size = get_os_ddp_config()
             dist.init_process_group(backend='nccl', rank=rank, world_size=world_size)
             self.model = DistributedDataParallel(self.model, device_ids=[self.device.index], find_unused_parameters=ddp_find_unused_parameters)
-            train_sampler = torch.utils.data.DistributedSampler(dataset, shuffle=not self.use_iterable_dataset, rank=rank, num_replicas=world_size, drop_last=True)
+            train_sampler = torch.utils.data.DistributedSampler(dataset, shuffle=not self.use_iterable_dataset and self.ddp_shuffle, rank=rank, num_replicas=world_size, drop_last=True)
             dataloader = torch.utils.data.DataLoader(
                 dataset,
                 batch_size=batch_size,

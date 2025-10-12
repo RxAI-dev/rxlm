@@ -41,11 +41,11 @@ class PrintLossCallback(TrainerCallback):
     def on_batch_end(self, model: nn.Module, batch_idx: int, loss: torch.Tensor,
                      batch: dict[str, torch.Tensor]) -> None:
         self.batch_group_losses.append(loss)
-        self.epoch_losses.append(loss)
 
         if batch_idx != 0 and batch_idx % self.batch_log_interval == 0:
             batch_group_mean = torch.stack(self.batch_group_losses).mean().item()
             self.batch_group_losses = []
+            self.epoch_losses.append(batch_group_mean)
             if self.batches_per_epoch is not None:
                 print(
                     f'Batch {batch_idx} / {self.batches_per_epoch} - loss: {loss}, last {self.batch_log_interval} batches mean loss: {batch_group_mean:.4f}')
