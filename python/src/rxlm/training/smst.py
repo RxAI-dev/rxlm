@@ -42,8 +42,14 @@ class SupervisedMemoryAttentionTrainer(BaseTrainer):
         self.label_weights_random_factor = label_weights_random_factor
         self.stm_diff_factor = stm_diff_factor
 
+    def _get_model(self):
+        model = self.model
+        if isinstance(model, DistributedDataParallel):
+            model = next(model.children())
+        return model
+
     def reset_stm(self):
-        self.model.reset_memory()
+        self._get_model().reset_memory()
 
     def _run_epoch(
             self,
@@ -57,9 +63,10 @@ class SupervisedMemoryAttentionTrainer(BaseTrainer):
         for callback in self.callbacks:
             callback.on_epoch_start(self.model, epoch)
 
-        self.accumulated_loss = 0.0
+        self.accumulated_loss = torch.tensor(0.0, device=self.device)
         self.optimizer_step_count = 0
 
+        accumulated_tokens = torch.tensor(0, dtype=torch.long, device=self.device)
         for batch_idx, batch in enumerate(dataloader):
             if not self.is_running:
                 break
@@ -83,8 +90,8 @@ class SupervisedMemoryAttentionTrainer(BaseTrainer):
                                 interactions[inner_step_idx - 1]['query'], interactions[inner_step_idx - 1]['answer']
                             )
 
-                        self.model.clone_reset_memory()
-                        accumulated_stm = self.model.get_memory_state()
+                        self._get_model().clone_reset_memory()
+                        accumulated_stm = self._get_model().get_memory_state()
 
                         label_weights = self.label_weights(inner_step_idx) if callable(self.label_weights) else \
                             self.label_weights[inner_step_idx]
@@ -104,6 +111,7 @@ class SupervisedMemoryAttentionTrainer(BaseTrainer):
                                                    pad_token_id=self.pad_token_id),
                                     'acc_stm': accumulated_stm,
                                 }
+                                accumulated_tokens += train_batch['attention_mask'].sum()
                                 loss, cosine_sim = self.compute_loss(train_batch, weights=label_weights,
                                                                      inner_step_idx=inner_step_idx)
                         else:
@@ -112,11 +120,11 @@ class SupervisedMemoryAttentionTrainer(BaseTrainer):
                                                pad_token_id=self.pad_token_id),
                                 'acc_stm': accumulated_stm,
                             }
+                            accumulated_tokens += train_batch['attention_mask'].sum()
                             loss, cosine_sim = self.compute_loss(train_batch, weights=label_weights,
                                                                  inner_step_idx=inner_step_idx)
 
-                        orig_loss = loss.item()
-                        self.accumulated_loss += orig_loss
+                        self.accumulated_loss += loss
                         loss = loss / self.gradient_accumulation_steps
 
                         if self.use_amp:
@@ -129,7 +137,7 @@ class SupervisedMemoryAttentionTrainer(BaseTrainer):
                             # Clip gradients after accumulation
                             if self.use_amp:
                                 scaler.unscale_(optimizer)
-                            torch.nn.utils.clip_grad_norm_(self.model.trainable_parameters(), max_norm=1.0,
+                            torch.nn.utils.clip_grad_norm_(self._get_model().trainable_parameters(), max_norm=1.0,
                                                            error_if_nonfinite=False)
                             if self.use_amp:
                                 scaler.step(optimizer)
@@ -149,22 +157,22 @@ class SupervisedMemoryAttentionTrainer(BaseTrainer):
                                     epoch_step=(batch_idx * number_of_inner_steps) + inner_step_idx,
                                     inner_step=inner_step_idx,
                                 )
+                                self.total_tokens += accumulated_tokens.item()
+                                accumulated_tokens = torch.tensor(0, dtype=torch.long, device=self.device)
+                                self.writer.add_scalar(
+                                    'Processed tokens',
+                                    self.total_tokens,
+                                    self.total_inner_steps
+                                )
 
                             self.accumulated_loss = 0.0
                             self.optimizer_step_count = 0
 
-                        if self.writer:
-                            self.total_tokens += train_batch['attention_mask'].sum().item()
-                            self.writer.add_scalar(
-                                'Processed tokens',
-                                self.total_tokens,
-                                self.total_inner_steps
-                            )
 
                         for callback in self.callbacks:
                             should_stop = callback.on_batch_end(
                                 self.model, (batch_idx * number_of_inner_steps) + inner_step_idx,
-                                orig_loss, train_batch
+                                loss, train_batch
                             )
                             if should_stop:
                                 self.is_running = False
@@ -240,7 +248,7 @@ class SupervisedMemoryAttentionTrainer(BaseTrainer):
         loss = -cosine_sim.mean()
 
         if self.stm_diff_factor is not None:
-            updated_stm = self.model.get_memory_state()
+            updated_stm = self._get_model().get_memory_state()
             step_diff = F.mse_loss(updated_stm, accumulated_stm, reduction='mean')
             step_diff_factor = self.stm_diff_factor * torch.sqrt(torch.tensor(inner_step_idx + 1).to(self.device))
             loss += step_diff_factor * step_diff
@@ -328,8 +336,8 @@ class SupervisedMemoryAttentionTrainer(BaseTrainer):
                             next_query, next_answer = self._move_multiple_batches(
                                 interactions[inner_step_idx - 1]['query'], interactions[inner_step_idx - 1]['answer'])
 
-                        self.model.clone_reset_memory()
-                        accumulated_stm = self.model.get_memory_state()
+                        self._get_model().clone_reset_memory()
+                        accumulated_stm = self._get_model().get_memory_state()
 
                         label_weights = self.label_weights(inner_step_idx) if callable(self.label_weights) else \
                             self.label_weights[inner_step_idx]
@@ -360,7 +368,7 @@ class SupervisedMemoryAttentionTrainer(BaseTrainer):
                         val_loss += loss
                         val_cosine += cosine_sim
 
-                        updated_stm = self.model.get_memory_state()
+                        updated_stm = self._get_model().get_memory_state()
 
                         step_diff = torch.sqrt(F.mse_loss(updated_stm, accumulated_stm, reduction='mean'))
                         val_stm_diff += step_diff
@@ -411,6 +419,7 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
             pad_token_id: int = 0,
             train_only_decoder: bool = False,
             unfreeze_epochs: tuple[int, int] = (0, 0),
+            use_system_prompt: bool = False,
             dataset_collate_fn: Callable[[list[Any]], dict[str, Any]] = MrlCurriculumDataset.collate_mrl_batch,
             **kwargs
     ):
@@ -427,17 +436,24 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
         self.pad_token_id = pad_token_id
         self.train_only_decoder = train_only_decoder
         self.unfreeze_epochs = unfreeze_epochs
+        self.use_system_prompt = use_system_prompt
 
         if not self.train_only_decoder:
             mem_attn_unfreeze_epoch, encoder_unfreeze_epoch = self.unfreeze_epochs
             if mem_attn_unfreeze_epoch != 0:
-                self.model.memory_attention.freeze()
+                self._get_model().memory_attention.freeze()
 
             if encoder_unfreeze_epoch != 0:
-                self.model.encoder.freeze_all()
+                self._get_model().encoder.freeze_all()
+
+    def _get_model(self):
+        model = self.model
+        if isinstance(model, DistributedDataParallel):
+            model = next(model.children())
+        return model
 
     def reset_stm(self):
-        self.model.reset_memory()
+        self._get_model().reset_memory()
 
     def _run_epoch(
             self,
@@ -454,13 +470,14 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
         if not self.train_only_decoder:
             mem_attn_unfreeze_epoch, encoder_unfreeze_epoch = self.unfreeze_epochs
             if mem_attn_unfreeze_epoch == epoch:
-                self.model.memory_attention.unfreeze()
+                self._get_model().memory_attention.unfreeze()
 
             if encoder_unfreeze_epoch == epoch:
-                self.model.encoder.unfreeze_all(True, True) # TODO: Remove freeze memory after removing cross-attn from encoder
+                self._get_model().encoder.unfreeze_all(True, True) # TODO: Remove freeze memory after removing cross-attn from encoder
 
-        self.accumulated_loss = 0.0
+        self.accumulated_loss = torch.tensor(0.0, device=self.device)
         self.optimizer_step_count = 0
+        accumulated_tokens = torch.tensor(0, dtype=torch.long, device=self.device)
 
         for batch_idx, batch in enumerate(dataloader):
             if not self.is_running:
@@ -487,30 +504,33 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
                             next_query, next_answer = self._move_multiple_batches(interactions[inner_step_idx - 1]['query'],
                                                                               interactions[inner_step_idx - 1]['answer'])
 
-                        self.model.clone_reset_memory()
+                        self._get_model().clone_reset_memory()
 
                         query_lens = next_query['attention_mask'].sum(dim=-1)
+
+
 
                         if self.use_amp:
                             with torch.amp.autocast(device_type=self.device.type, dtype=self.dtype):
                                 train_batch = {
                                     'prev': smart_concat(prev_query, prev_answer, max_length=self.max_seq_len,
-                                                         pad_token_id=self.pad_token_id),
+                                                         pad_token_id=self.pad_token_id) if not self.use_system_prompt or inner_step_idx != 0 else self._move_batch(batch['system']),
                                     'next': smart_concat(next_query, next_answer, max_length=self.max_seq_len,
                                                          pad_token_id=self.pad_token_id),
                                 }
-                                loss, _ = self.compute_loss(train_batch, query_lens=query_lens, is_first_step=inner_step_idx==0)
+                                accumulated_tokens += train_batch['next']['attention_mask'].sum()
+                                loss, _ = self.compute_loss(train_batch, query_lens=query_lens, is_first_step=not self.use_system_prompt and inner_step_idx==0)
                         else:
                             train_batch = {
                                 'prev': smart_concat(prev_query, prev_answer, max_length=self.max_seq_len,
-                                                     pad_token_id=self.pad_token_id),
+                                                     pad_token_id=self.pad_token_id) if not self.use_system_prompt or inner_step_idx != 0 else self._move_batch(batch['system']),
                                 'next': smart_concat(next_query, next_answer, max_length=self.max_seq_len,
                                                      pad_token_id=self.pad_token_id),
                             }
-                            loss, _ = self.compute_loss(train_batch, query_lens=query_lens, is_first_step=inner_step_idx==0)
+                            accumulated_tokens += train_batch['next']['attention_mask'].sum()
+                            loss, _ = self.compute_loss(train_batch, query_lens=query_lens, is_first_step=not self.use_system_prompt and inner_step_idx==0)
 
-                        orig_loss = loss.item()
-                        self.accumulated_loss += orig_loss
+                        self.accumulated_loss += loss
                         loss = loss / self.gradient_accumulation_steps
 
                         if self.use_amp:
@@ -523,7 +543,7 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
                             # Clip gradients after accumulation
                             if self.use_amp:
                                 scaler.unscale_(optimizer)
-                            torch.nn.utils.clip_grad_norm_(self.model.trainable_parameters(), max_norm=1.0,
+                            torch.nn.utils.clip_grad_norm_(self._get_model().trainable_parameters(), max_norm=1.0,
                                                            error_if_nonfinite=False)
                             if self.use_amp:
                                 scaler.step(optimizer)
@@ -536,21 +556,22 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
                             if scheduler is not None:
                                 scheduler.step()
 
-                            if self.writer:
+                            if self.writer and self.total_steps % self.tensorboard_interval:
                                 loss_item = self.accumulated_loss / self.gradient_accumulation_steps
                                 self._train_writer(
-                                    loss_item,
+                                    loss_item.item(),
                                     epoch_step=(batch_idx * number_of_inner_steps) + inner_step_idx,
                                     inner_step=inner_step_idx,
                                 )
 
-                            self.accumulated_loss = 0.0
+                            self.accumulated_loss = torch.tensor(0.0, device=self.device)
                             self.optimizer_step_count = 0
 
                         prev_query, prev_answer = self._move_multiple_batches(next_query, next_answer)
 
-                        if self.writer:
-                            self.total_tokens += train_batch['next']['attention_mask'].sum().item()
+                        if self.writer and self.total_steps % self.tensorboard_interval:
+                            self.total_tokens += accumulated_tokens.item()
+                            accumulated_tokens = torch.tensor(0, dtype=torch.long, device=self.device)
                             self.writer.add_scalar(
                                 'Processed tokens',
                                 self.total_tokens,
@@ -560,7 +581,7 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
                         for callback in self.callbacks:
                             should_stop = callback.on_batch_end(self.model,
                                                                 (batch_idx * number_of_inner_steps) + inner_step_idx,
-                                                                orig_loss, train_batch['next'])
+                                                                loss, train_batch['next'])
                             if should_stop:
                                 self.is_running = False
 
@@ -608,7 +629,7 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
         if not self.use_moe_aux_loss:
             return main_loss
 
-        model = next(self.model.children()) if isinstance(self.model, DistributedDataParallel) else self.model
+        model = self._get_model()
 
         router_loss = model.decoder.model.moe_router_loss()
         loss = main_loss + self.moe_aux_loss_scale * router_loss
@@ -742,7 +763,7 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
                             next_query, next_answer = self._move_multiple_batches(interactions[inner_step_idx - 1]['query'],
                                                                               interactions[inner_step_idx - 1]['answer'])
 
-                        self.model.clone_reset_memory()
+                        self._get_model().clone_reset_memory()
 
                         query_lens = next_query['attention_mask'].sum(dim=-1)
 

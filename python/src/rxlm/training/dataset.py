@@ -1303,3 +1303,200 @@ class JointLMIterableDataset(BaseIterableDataset):
                 },
                 'attention_mask': attention_mask,
             }
+
+
+class SmatDataset(MrlCurriculumDataset):
+    def __init__(
+            self,
+            episodes: Union[list[dict], HfDataset],
+            tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+            max_seq_len: int = 1024,
+            query_field: str = 'query',
+            answer_field: str = 'answer',
+            interactions_field: str = 'interactions',
+            query_token: str = '[Q]',
+            answer_token: str = '[A]',
+            bos_token: str = '[BOS]',
+            eos_token: str = '[EOS]',
+            use_system_prompt: bool = False,
+            system_field: str = 'system',
+            system_prompt_title: str = 'SYSTEM INSTRUCTIONS',
+            **kwargs,
+    ):
+        super(SmatDataset, self).__init__(
+            episodes,
+            tokenizer,
+            max_seq_len,
+            query_field,
+            answer_field,
+            interactions_field,
+            query_token,
+            answer_token,
+            bos_token,
+            eos_token,
+            **kwargs
+        )
+        self.system_field = system_field
+        self.use_system_prompt = use_system_prompt
+        self.system_prompt_title = system_prompt_title
+
+    def _tokenize_system_prompt(self, system: str) -> dict[str, dict[str, torch.Tensor]]:
+        # Manually construct query: [BOS][Q]query
+        system_text = f"{self.bos_token}{self.query_token}{self.system_prompt_title}{self.answer_token}{system}{self.eos_token}"
+        system_enc = self.tokenizer(
+            system_text,
+            max_length=self.max_seq_len,
+            padding='max_length',
+            truncation=True,
+            return_tensors='pt',
+            add_special_tokens=False  # Critical: We control all tokens
+        )
+
+        return {
+            'system': {
+                'input_ids': system_enc['input_ids'][0],
+                'attention_mask': system_enc['attention_mask'][0],
+            },
+
+        }
+
+    def get_tokenized_item(self, idx: int, episode: dict = None) -> MrlDataItem:
+        if self.is_pre_tokenized:
+            return self.inputs[idx]
+        else:
+            item = self.episodes[idx] if episode is None else episode
+            query = item[self.query_field]
+            answer = item[self.answer_field]
+            interactions = item[self.interactions_field]
+
+            initial = self._tokenize_manual_interaction(query, answer)
+            follow_ups = [self._tokenize_manual_interaction(inter[self.query_field], inter[self.answer_field]) for inter
+                          in interactions]
+
+            if self.use_system_prompt:
+                system_prompt = item[self.system_field]
+                system_enc = self._tokenize_system_prompt(system_prompt) if system_prompt is not None else None
+                return {
+                    **initial,
+                    'system': system_enc,
+                    'interactions': follow_ups,
+                }
+            else:
+                return {
+                    **initial,
+                    'interactions': follow_ups,
+                }
+
+    @classmethod
+    def from_hf_hub(
+            cls,
+            dataset_id: str,
+            tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+            split: str = 'train',
+            query_field: str = 'query',
+            answer_field: str = 'answer',
+            interactions_field: str = 'interactions',
+            load_kwargs: dict = None,
+            max_seq_len: int = 1024,
+            **kwargs
+    ):
+        """
+        Load dataset from HuggingFace Hub and convert it to RxNN training dataset.
+
+        One of the `tokenizer` or `tokenizer_hub_id` args must be provided. If both are provided, `tokenizer` will be used.
+
+        Args:
+            dataset_id (str): Hub dataset repository name
+            tokenizer (Union[PreTrainedTokenizer, PreTrainedTokenizerFast]): Tokenizer
+            split (str): Dataset split (default: "train")
+            query_field (str): Query field (default: "query")
+            answer_field (str): Answer field (default: "answer")
+            interactions_field (str): Interactions field (default: "interactions")
+            load_kwargs (dict): Additional args for HuggingFace API load_dataset function
+            max_seq_len (int): Maximum sequence length (default: 1024)
+            **kwargs: Additional args for RxNN Dataset class
+        """
+        if load_kwargs is None:
+            load_kwargs = {}
+
+        hf_dataset = load_dataset(dataset_id, split=split, **load_kwargs)
+
+        return cls(hf_dataset, tokenizer, query_field=query_field, answer_field=answer_field,
+                   interactions_field=interactions_field, max_seq_len=max_seq_len, **kwargs)
+
+    @staticmethod
+    def collate_smat_batch(batch: list[MrlDataItem]) -> MrlDataItem:
+        """Collate function for MRL curriculum dataset with nested interactions"""
+
+        def collate_interaction_batch(interaction_batch: Union[list[dict[str, dict[str, torch.Tensor]]], tuple[Any]]) -> \
+                dict[str, dict[ItemFields, torch.Tensor]]:
+            """Helper to collate a batch of interactions"""
+            return {
+                'query': {
+                    'input_ids': torch.stack([x['query']['input_ids'] for x in interaction_batch]),
+                    'attention_mask': torch.stack([x['query']['attention_mask'] for x in interaction_batch]),
+                },
+                'answer': {
+                    'input_ids': torch.stack([x['answer']['input_ids'] for x in interaction_batch]),
+                    'attention_mask': torch.stack([x['answer']['attention_mask'] for x in interaction_batch]),
+                }
+            }
+
+        batch_interactions = [x['interactions'] for x in batch]
+        transposed_interactions = list(zip(*batch_interactions))
+
+        return {
+            **collate_interaction_batch(batch),  # Collate initial query and answer
+            'interactions': [
+                collate_interaction_batch(step_batch) for step_batch in transposed_interactions
+            ]
+        }
+
+    @staticmethod
+    def collate_smat_batch_with_system(batch: list[MrlDataItem]) -> MrlDataItem:
+        """Collate function for MRL curriculum dataset with nested interactions"""
+
+        def collate_interaction_batch(interaction_batch: Union[list[dict[str, dict[str, torch.Tensor]]], tuple[Any]]) -> \
+                dict[str, dict[ItemFields, torch.Tensor]]:
+            """Helper to collate a batch of interactions"""
+            return {
+                'query': {
+                    'input_ids': torch.stack([x['query']['input_ids'] for x in interaction_batch]),
+                    'attention_mask': torch.stack([x['query']['attention_mask'] for x in interaction_batch]),
+                },
+                'answer': {
+                    'input_ids': torch.stack([x['answer']['input_ids'] for x in interaction_batch]),
+                    'attention_mask': torch.stack([x['answer']['attention_mask'] for x in interaction_batch]),
+                }
+            }
+
+        def collate_system_prompt(interaction_batch: Union[list[dict[str, dict[str, torch.Tensor]]], tuple[Any]]) -> \
+                dict[str, dict[ItemFields, torch.Tensor]]:
+            """Helper to collate a batch of interactions"""
+
+            empty_ids = torch.zeros_like(interaction_batch[0]['query']['input_ids'])
+            empty_mask = torch.zeros_like(interaction_batch[0]['query']['attention_mask'])
+
+            def get_input_ids(x: dict[str, dict[str, torch.Tensor]]) -> torch.Tensor:
+                return x['system']['input_ids'] if x['system'] is not None else empty_ids
+
+            def get_attention_mask(x: dict[str, dict[str, torch.Tensor]]) -> torch.Tensor:
+                return x['system']['attention_mask'] if x['system'] is not None else empty_mask
+
+            return {
+                'system': {
+                    'input_ids': torch.stack([get_input_ids(x) for x in interaction_batch]),
+                    'attention_mask': torch.stack([get_attention_mask(x) for x in interaction_batch]),
+                },
+            }
+
+        batch_interactions = [x['interactions'] for x in batch]
+        transposed_interactions = list(zip(*batch_interactions))
+
+        return {
+            **collate_interaction_batch(batch),  # Collate initial query and answer
+            **collate_system_prompt(batch),
+            'interactions': [
+                collate_interaction_batch(step_batch) for step_batch in transposed_interactions
+            ]
+        }
