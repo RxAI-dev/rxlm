@@ -916,6 +916,12 @@ class MrlCurriculumDataset(Dataset):
             add_special_tokens=False  # Critical: We control all tokens
         )
 
+        if not (query_enc['input_ids'][0] < self.tokenizer.vocab_size).all():
+            query_enc['input_ids'][0][
+                (query_enc['input_ids'][0] >= self.tokenizer.vocab_size)] = self.tokenizer.unk_token_id
+        if not (query_enc['input_ids'][0] >= 0).all():
+            query_enc['input_ids'][0][query_enc['input_ids'][0] < 0] = self.tokenizer.unk_token_id
+
         # Manually construct answer: [A]answer[EOS]
         answer_text = f"{self.answer_token}{answer}{self.eos_token}"
         answer_enc = self.tokenizer(
@@ -926,6 +932,12 @@ class MrlCurriculumDataset(Dataset):
             return_tensors='pt',
             add_special_tokens=False  # Critical: We control all tokens
         )
+
+        if not (answer_enc['input_ids'][0] < self.tokenizer.vocab_size).all():
+            answer_enc['input_ids'][0][
+                (answer_enc['input_ids'][0] >= self.tokenizer.vocab_size)] = self.tokenizer.unk_token_id
+        if not (answer_enc['input_ids'][0] >= 0).all():
+            answer_enc['input_ids'][0][answer_enc['input_ids'][0] < 0] = self.tokenizer.unk_token_id
 
         return {
             'query': {
