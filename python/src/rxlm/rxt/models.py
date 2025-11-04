@@ -1052,7 +1052,7 @@ class RxTAlpha(nn.Module, PyTorchModelHubMixin, pipeline_tag="text-generation", 
 
         # Forward pass to get next token logits
         outputs = self.forward(
-            input_ids[:, -1] if not init_step else input_ids, attention_mask=attention_mask[:, -1] if not init_step else attention_mask, stm_kv_cache=stm_kv_cache,
+            input_ids[:, -1].unsqueeze(0) if not init_step else input_ids, attention_mask=attention_mask[:, -1].unsqueeze(0) if not init_step else attention_mask, stm_kv_cache=stm_kv_cache,
             use_self_attn_cache=use_self_attn_cache, action=RxTForwardAction.DECODE, current_positions=torch.tensor([[input_ids.size(-1)]]).to(input_ids.device) if not init_step else None
         )
         next_token_logits = outputs[:, -1, :]  # Get logits for next token
