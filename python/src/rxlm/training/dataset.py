@@ -1403,7 +1403,8 @@ class SmatDataset(MrlCurriculumDataset):
     def from_hf_hub(
             cls,
             dataset_id: str,
-            tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+            subset: str = None,
+            tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast] = None,
             split: str = 'train',
             query_field: str = 'query',
             answer_field: str = 'answer',
@@ -1419,6 +1420,7 @@ class SmatDataset(MrlCurriculumDataset):
 
         Args:
             dataset_id (str): Hub dataset repository name
+            subset (str): Dataset subset
             tokenizer (Union[PreTrainedTokenizer, PreTrainedTokenizerFast]): Tokenizer
             split (str): Dataset split (default: "train")
             query_field (str): Query field (default: "query")
@@ -1431,10 +1433,116 @@ class SmatDataset(MrlCurriculumDataset):
         if load_kwargs is None:
             load_kwargs = {}
 
-        hf_dataset = load_dataset(dataset_id, split=split, **load_kwargs)
+        hf_dataset = load_dataset(dataset_id, subset, split=split, **load_kwargs) if subset is not None else load_dataset(dataset_id, split=split, **load_kwargs)
 
         return cls(hf_dataset, tokenizer, query_field=query_field, answer_field=answer_field,
                    interactions_field=interactions_field, max_seq_len=max_seq_len, **kwargs)
+
+    @classmethod
+    def concat_from_hf_hub(
+            cls,
+            dataset_ids: tuple[str],
+            subsets: tuple[str] = None,
+            tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast] = None,
+            split: str = 'train',
+            query_field: str = 'query',
+            answer_field: str = 'answer',
+            interactions_field: str = 'interactions',
+            max_seq_len: int = 1024,
+            load_kwargs: dict = None,
+            **kwargs
+    ):
+        """
+        Load and concatenate multiple datasets from HuggingFace Hub, create validation split and convert them to RxNN training dataset.
+        All datasets should use the same split and target field. If it's not the case, just use `load_dataset` and pass the
+        result to RxNN dataset constructor directly.
+
+        One of the `tokenizer` or `tokenizer_hub_id` args must be provided. If both are provided, `tokenizer` will be used.
+
+        Args:
+            dataset_ids (tuple[str]): Hub dataset repository names
+            subsets (tuple[str]): Dataset subsets (default: None)
+            split (str): Dataset split (default: "train")
+            query_field (str): Query field (default: "query")
+            answer_field (str): Answer field (default: "answer")
+            interactions_field (str): Interactions field (default: "interactions")
+            tokenizer (PreTrainedTokenizer): HuggingFace Tokenizer used for training (default: None)
+            max_seq_len (int): Maximum sequence length for training (default: 1024)
+            load_kwargs (dict): Additional args for HuggingFace API load_dataset function
+            **kwargs: Additional args for RxNN Dataset class
+        """
+        if load_kwargs is None:
+            load_kwargs = {}
+
+        hf_datasets = [
+            load_dataset(dataset_id, subset, split=split, **load_kwargs) for dataset_id, subset in
+            zip(dataset_ids, subsets)
+        ] if subsets is not None else [
+            load_dataset(dataset_id, split=split, **load_kwargs) for dataset_id in dataset_ids
+        ]
+
+        hf_dataset = concatenate_datasets(hf_datasets)
+
+        return cls(hf_dataset, tokenizer, max_seq_len=max_seq_len, query_field=query_field, answer_field=answer_field, interactions_field=interactions_field, **kwargs)
+
+
+    @classmethod
+    def concat_from_hf_hub_with_subset(
+            cls,
+            dataset_ids: tuple[str],
+            subsets: tuple[str] = None,
+            tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast] = None,
+            split: str = 'train',
+            query_field: str = 'query',
+            answer_field: str = 'answer',
+            interactions_field: str = 'interactions',
+            max_seq_len: int = 1024,
+            load_kwargs: dict = None,
+            valid_size: Union[float, tuple[int]] = 0.1,
+            **kwargs
+    ):
+        """
+        Load and concatenate multiple datasets from HuggingFace Hub, create validation split and convert them to RxNN training dataset.
+        All datasets should use the same split and target field. If it's not the case, just use `load_dataset` and pass the
+        result to RxNN dataset constructor directly.
+
+        One of the `tokenizer` or `tokenizer_hub_id` args must be provided. If both are provided, `tokenizer` will be used.
+
+        Args:
+            dataset_ids (tuple[str]): Hub dataset repository names
+            subsets (tuple[str]): Dataset subsets (default: None)
+            split (str): Dataset split (default: "train")
+            query_field (str): Query field (default: "query")
+            answer_field (str): Answer field (default: "answer")
+            interactions_field (str): Interactions field (default: "interactions")
+            tokenizer (PreTrainedTokenizer): HuggingFace Tokenizer used for training (default: None)
+            max_seq_len (int): Maximum sequence length for training (default: 1024)
+            load_kwargs (dict): Additional args for HuggingFace API load_dataset function
+            valid_size (float): Size of validation dataset  (default: 0.1)
+            **kwargs: Additional args for RxNN Dataset class
+        """
+        if load_kwargs is None:
+            load_kwargs = {}
+
+        hf_datasets = [
+            load_dataset(dataset_id, subset, split=split, **load_kwargs) for dataset_id, subset in
+            zip(dataset_ids, subsets)
+        ] if subsets is not None else [
+            load_dataset(dataset_id, split=split, **load_kwargs) for dataset_id in dataset_ids
+        ]
+
+        if isinstance(valid_size, float):
+            hf_ds_dicts = [dataset.train_test_split(test_size=valid_size) for dataset in hf_datasets]
+        else:
+            hf_ds_dicts = [dataset.train_test_split(test_size=valid_size[i]) for i, dataset in enumerate(hf_datasets)]
+
+        hf_dataset = concatenate_datasets([ds_dict['train'] for ds_dict in hf_ds_dicts])
+        hf_valid_dataset = concatenate_datasets([ds_dict['test'] for ds_dict in hf_ds_dicts])
+
+        return (
+            cls(hf_dataset, tokenizer, max_seq_len=max_seq_len, query_field=query_field, answer_field=answer_field, interactions_field=interactions_field, **kwargs),
+            cls(hf_valid_dataset, tokenizer, max_seq_len=max_seq_len, query_field=query_field, answer_field=answer_field, interactions_field=interactions_field, **kwargs)
+        )
 
     @staticmethod
     def collate_smat_batch(batch: list[MrlDataItem]) -> MrlDataItem:
@@ -1486,14 +1594,14 @@ class SmatDataset(MrlCurriculumDataset):
                 dict[str, dict[ItemFields, torch.Tensor]]:
             """Helper to collate a batch of interactions"""
 
-            empty_ids = torch.zeros_like(interaction_batch[0]['query']['input_ids'])
-            empty_mask = torch.zeros_like(interaction_batch[0]['query']['attention_mask'])
+            empty_ids = torch.zeros_like(interaction_batch[0]['query']['input_ids'], dtype=torch.long)
+            empty_mask = torch.zeros_like(interaction_batch[0]['query']['attention_mask'], dtype=torch.long)
 
             def get_input_ids(x: dict[str, dict[str, torch.Tensor]]) -> torch.Tensor:
-                return x['system']['input_ids'] if x['system'] is not None else empty_ids
+                return x['system']['input_ids'] if x['system'] is not None else empty_ids.clone()
 
             def get_attention_mask(x: dict[str, dict[str, torch.Tensor]]) -> torch.Tensor:
-                return x['system']['attention_mask'] if x['system'] is not None else empty_mask
+                return x['system']['attention_mask'] if x['system'] is not None else empty_mask.clone()
 
             return {
                 'system': {

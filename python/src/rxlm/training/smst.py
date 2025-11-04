@@ -508,8 +508,6 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
 
                         query_lens = next_query['attention_mask'].sum(dim=-1)
 
-
-
                         if self.use_amp:
                             with torch.amp.autocast(device_type=self.device.type, dtype=self.dtype):
                                 train_batch = {
@@ -771,19 +769,19 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
                             with torch.amp.autocast(device_type=self.device.type, dtype=self.dtype):
                                 valid_batch = {
                                     'prev': smart_concat(prev_query, prev_answer, max_length=self.max_seq_len,
-                                                         pad_token_id=self.pad_token_id),
+                                                         pad_token_id=self.pad_token_id) if not self.use_system_prompt or inner_step_idx != 0 else self._move_batch(batch['system']),
                                     'next': smart_concat(next_query, next_answer, max_length=self.max_seq_len,
                                                          pad_token_id=self.pad_token_id),
                                 }
-                                decoder_loss, decoder_logits = self.compute_loss(valid_batch, query_lens=query_lens, is_first_step=inner_step_idx==0)
+                                decoder_loss, decoder_logits = self.compute_loss(valid_batch, query_lens=query_lens, is_first_step=not self.use_system_prompt and inner_step_idx==0)
                         else:
                             valid_batch = {
                                 'prev': smart_concat(prev_query, prev_answer, max_length=self.max_seq_len,
-                                                     pad_token_id=self.pad_token_id),
+                                                     pad_token_id=self.pad_token_id) if not self.use_system_prompt or inner_step_idx != 0 else self._move_batch(batch['system']),
                                 'next': smart_concat(next_query, next_answer, max_length=self.max_seq_len,
                                                      pad_token_id=self.pad_token_id),
                             }
-                            decoder_loss, decoder_logits = self.compute_loss(valid_batch, query_lens=query_lens, is_first_step=inner_step_idx==0)
+                            decoder_loss, decoder_logits = self.compute_loss(valid_batch, query_lens=query_lens, is_first_step=not self.use_system_prompt and inner_step_idx==0)
 
                         val_loss += decoder_loss
 
