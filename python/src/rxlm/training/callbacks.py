@@ -7,6 +7,7 @@ from torch.nn.parallel import DistributedDataParallel
 from huggingface_hub import PyTorchModelHubMixin
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from ..utils import human_format
+from .tokenizer import decode_post_process
 
 
 class TrainerCallback:
@@ -650,7 +651,7 @@ class MrlPrintCallback(MrlTrainerCallback):
 
     def _decode_sequence(self, sequence: dict[str, torch.Tensor]) -> str:
         seq_len = sequence['attention_mask'].sum().item()
-        decoded = self.tokenizer.decode(sequence['input_ids'][:seq_len]).replace('Ċ', '\n').replace('Ġ', ' ')
+        decoded = decode_post_process(self.tokenizer.decode(sequence['input_ids'][:seq_len]))
         return decoded
 
     def _get_generated_text(

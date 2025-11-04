@@ -17,6 +17,7 @@ from ..memory.attention import StmMemoryAttention, InterlayerStmMemoryAttention,
 from ..memory.gate import ResidualGate, ResidualGateType, SlotStatusType
 from ..utils import get_model_size
 from ..experimental.attention import init_experimental_attention
+from ..training.tokenizer import decode_post_process
 
 
 class RxTComponentConfig(TypedDict):
@@ -1000,13 +1001,13 @@ class RxTAlpha(nn.Module, PyTorchModelHubMixin, pipeline_tag="text-generation", 
         }
 
     def stringify_token(self, token_id: int) -> str:
-        return self.tokenizer.decode([token_id]).replace('Ċ', '\n').replace('Ġ', ' ')
+        return decode_post_process(self.tokenizer.decode([token_id]))
 
     def stringify_tokens(self, generated_ids: torch.Tensor) -> list[str]:
         decoded = []
         for token_id in generated_ids:
             # Trim after end token
-            decoded.append(self.tokenizer.decode([token_id]).replace('Ċ', '\n').replace('Ġ', ' '))
+            decoded.append(decode_post_process(self.tokenizer.decode([token_id])))
 
         return decoded
 
@@ -1017,7 +1018,7 @@ class RxTAlpha(nn.Module, PyTorchModelHubMixin, pipeline_tag="text-generation", 
             end_pos = (seq == self.sampler.eos_token_id).nonzero()
             if end_pos.size(0) > 0:
                 seq = seq[:end_pos[0] + 1]
-            decoded.append(self.tokenizer.decode(seq).replace('Ċ', '\n').replace('Ġ', ' '))
+            decoded.append(decode_post_process(self.tokenizer.decode(seq)))
 
         return decoded
 

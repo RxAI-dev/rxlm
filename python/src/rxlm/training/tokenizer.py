@@ -212,3 +212,20 @@ def load_tokenizer_from_hf_hub(repo_id: str, **kwargs) -> PreTrainedTokenizerFas
 
 def load_tokenizer_from_file(path: str) -> PreTrainedTokenizerFast:
     return TokenizerTrainer.hf_tokenizer_from_file(path)
+
+def decode_post_process(txt_token: str) -> str:
+    glitch_fixes = {
+        'Ġ': ' ', # space
+        'Ċ': '\n', # new line
+        'âĢĲ': '-',  # hyphen/minus
+        'âĢĻ': "'",  # apostrophe
+        'âĢĵ': ':', # colon
+        'âĢĶ': ',',  # comma
+        'ÃĹ': 'x',  # multiplication
+        'â€Ĺ': '"',  # quotes
+        'â€Ħ': '-',  # en-dash
+    }
+    for glitch, fix in glitch_fixes.items():
+        txt_token = txt_token.replace(glitch, fix)
+
+    return txt_token
