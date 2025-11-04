@@ -77,13 +77,10 @@ class StmMemoryAttention(nn.Module):
         for i in range(self.num_layers):
             # 4. Get current layer STM value
             layer_stm = self.stm(i)
-            # 5. Expand layer STM to batch size, if it's not in batch mode
-            if layer_stm.size(0) == 1:
-                layer_stm = layer_stm.expand(x.size(0), -1, -1)
 
-            # 6. Calculate memory attention and update layer
+            # 5. Calculate memory attention and update layer
             new_stm[i] = self._main_attention(i, x, layer_stm, mask=attention_mask)
-        # 11. Update all layers
+        # 6. Update all layers
         self.stm.update_all(new_stm)
         return self.stm.memory
 
@@ -131,11 +128,8 @@ class InterlayerStmMemoryAttention(StmMemoryAttention):
         for i in range(self.num_layers):
             # 6. Get current layer STM value
             layer_stm = self.stm(i)
-            # 7. Expand layer STM to batch size, if it's not in batch mode
-            if layer_stm.size(0) == 1:
-                layer_stm = layer_stm.expand(x.size(1), -1, -1)
 
-            # 8. Mean interlayer memory attention
+            # 7. Mean interlayer memory attention
             # a) normalize STM layer value
             pre_normalized_layer_stm = self.mean_memory_norm_layers[i](layer_stm)
             # b) calculate attention between STM layer and mean value of all STM layers (from previous interaction)
@@ -143,9 +137,9 @@ class InterlayerStmMemoryAttention(StmMemoryAttention):
             # c) combine updated interlayer state with current STM state in residual gate
             updated_layer_stm = self.mean_residual_gate_layers[i](layer_stm, interlayer_stm)
 
-            # 9. Main memory attention
+            # 8. Main memory attention
             new_stm[i] = self._main_attention(i, x, updated_layer_stm, mask=attention_mask)
-        # 10. Update all layers
+        # 9. Update all layers
         self.stm.update_all(new_stm)
         return self.stm.memory
 
@@ -186,11 +180,8 @@ class SelfStmMemoryAttention(StmMemoryAttention):
         for i in range(self.num_layers):
             # 4. Get current layer STM value
             layer_stm = self.stm(i)
-            # 5. Expand layer STM to batch size, if it's not in batch mode
-            if layer_stm.size(0) == 1:
-                layer_stm = layer_stm.expand(x.size(0), -1, -1)
 
-            # 6. Memory Self-Attention
+            # 5. Memory Self-Attention
             # a) normalize STM layer value
             pre_normalized_layer_stm = self.self_memory_norm_layers[i](layer_stm)
             # b) calculate attention between STM layer and mean value of all STM layers (from previous interaction)
@@ -203,9 +194,9 @@ class SelfStmMemoryAttention(StmMemoryAttention):
             # c) combine updated interlayer state with current STM state in residual gate
             updated_layer_stm = self.self_residual_gate_layers[i](layer_stm, self_layer_stm)
 
-            # 7. Main memory attention
+            # 6. Main memory attention
             new_stm[i] = self._main_attention(i, x, updated_layer_stm, mask=attention_mask)
-        # 8. Update all layers/models
+        # 7. Update all layers/models
         self.stm.update_all(new_stm)
         return self.stm.memory
 
@@ -254,11 +245,8 @@ class SelfInterlayerStmMemoryAttention(StmMemoryAttention):
         for i in range(self.num_layers):
             # 6. Get current layer STM value
             layer_stm = self.stm(i)
-            # 7. Expand layer STM to batch size, if it's not in batch mode
-            if layer_stm.size(0) == 1:
-                layer_stm = layer_stm.expand(x.size(0), -1, -1)
 
-            # 8. Gated self/interlayer memory attention
+            # 7. Gated self/interlayer memory attention
             # a) normalize STM layer value
             pre_normalized_layer_stm = self.mean_memory_norm_layers[i](layer_stm)
             # b) combine interlayer and current layer data with gate
@@ -268,9 +256,9 @@ class SelfInterlayerStmMemoryAttention(StmMemoryAttention):
             # d) combine updated interlayer state with current STM state in residual gate
             updated_layer_stm = self.mean_residual_gate_layers[i](layer_stm, self_interlayer_stm)
 
-            # 9. Main memory attention
+            # 8. Main memory attention
             new_stm[i] = self._main_attention(i, x, updated_layer_stm, mask=attention_mask)
-        # 10. Update all layers/models
+        # 9. Update all layers/models
         self.stm.update_all(new_stm)
         return self.stm.memory
 
