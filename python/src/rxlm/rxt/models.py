@@ -1000,14 +1000,19 @@ class RxTAlpha(nn.Module, PyTorchModelHubMixin, pipeline_tag="text-generation", 
             'attention_mask': tokenized['attention_mask'].to(device)
         }
 
-    def stringify_token(self, token_id: int) -> str:
-        return decode_post_process(self.tokenizer.decode([token_id]))
+    def stringify_token(self, token_id: int, skip_special_tokens: bool = True, show_memory_update: bool = False) -> str:
+        if token_id == -1:
+            return '\n [STM update]' if show_memory_update else ''
+        elif token_id == -2:
+            return '\n [STM updated]' if show_memory_update else ''
+        else:
+            return decode_post_process(self.tokenizer.decode([token_id], skip_special_tokens=skip_special_tokens))
 
-    def stringify_tokens(self, generated_ids: torch.Tensor) -> list[str]:
+    def stringify_tokens(self, generated_ids: torch.Tensor, skip_special_tokens: bool = True) -> list[str]:
         decoded = []
         for token_id in generated_ids:
             # Trim after end token
-            decoded.append(decode_post_process(self.tokenizer.decode([token_id])))
+            decoded.append(decode_post_process(self.tokenizer.decode([token_id], skip_special_tokens=skip_special_tokens)))
 
         return decoded
 
