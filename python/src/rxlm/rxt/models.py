@@ -952,6 +952,16 @@ class RxTAlpha(nn.Module, PyTorchModelHubMixin, pipeline_tag="text-generation", 
         else:
             self.memory_attention(new_stm, attention_mask=attention_mask)
 
+    def reset_stm_state(self):
+        self.memory_attention.model.stm.reset()
+
+    def export_stm_state(self) -> torch.Tensor:
+        return self.memory_attention.model.stm.memory.clone().detach()
+
+    def load_stm_state(self, stm_state: torch.Tensor):
+        device = self.memory_attention.model.stm.memory.device
+        self.memory_attention.model.stm.update_all(stm_state.to(device))
+
     def tokenize_query(self, text: str, max_seq_len: int = 256, device: torch.device = torch.device("cpu")):
         tokenized = self.tokenizer(
             f'{self.bos_token}{self.query_token}{text}',
