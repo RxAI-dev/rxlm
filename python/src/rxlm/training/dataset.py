@@ -801,12 +801,60 @@ class JointSftDataset(BaseInteractionDataset):
 
 
 class DecoderSftDataset(BaseInteractionDataset):
+    def __init__(
+            self,
+            interactions: Union[list[dict], HfDataset],
+            tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+            max_seq_len: int = 1024,
+            query_field: str = 'query',
+            answer_field: str = 'answer',
+            query_token: str = '[Q]',
+            answer_token: str = '[A]',
+            bos_token: str = '[BOS]',
+            eos_token: str = '[EOS]',
+            ignore_index: int = -100,
+            **kwargs,
+    ):
+        super(DecoderSftDataset, self).__init__(
+            interactions,
+            tokenizer,
+            max_seq_len=max_seq_len,
+            query_field=query_field,
+            answer_field=answer_field,
+            **kwargs
+        )
+        self.query_token = query_token
+        self.answer_token = answer_token
+        self.bos_token = bos_token
+        self.eos_token = eos_token
+        self.ignore_index = ignore_index
+
+    def _create_masked_labels(self, input_ids: torch.Tensor) -> torch.Tensor:
+        labels = input_ids.clone()
+
+        query_token_id = self.tokenizer.convert_tokens_to_ids(self.query_token)
+        answer_token_id = self.tokenizer.convert_tokens_to_ids(self.answer_token)
+        eos_token_id = self.tokenizer.convert_tokens_to_ids(self.eos_token)
+
+        in_answer = False
+        for i in range(len(input_ids)):
+            token = input_ids[i].item()
+            if token == answer_token_id:
+                in_answer = True
+            elif token in (query_token_id, eos_token_id):
+                in_answer = False
+
+            if not in_answer or token == answer_token_id:
+                labels[i] = self.ignore_index
+
+        return labels
+
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         inputs = self.get_tokenized_text(idx)
 
         input_ids = inputs['input_ids'][0]
         attention_mask = inputs['attention_mask'][0]
-        targets = input_ids.clone()
+        targets = self._create_masked_labels(input_ids)
 
         return {
             'input_ids': input_ids,
