@@ -1,9 +1,10 @@
 import torch
-from datasets import load_dataset, Dataset as HfDataset
+from datasets import load_dataset, Dataset as HfDataset, IterableDataset as HfIterableDataset
 from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from typing import Union, TypeAlias, Literal
-from ..training.dataset import BaseDataset
+from ..training.dataset import BaseDataset, BaseIterableDataset
+from ..training.tokenizer import load_tokenizer_from_hf_hub
 
 class MaskedLMDataset(BaseDataset):
     def __init__(
@@ -249,3 +250,96 @@ class DecoderOnlySftDataset(Dataset):
         return cls(hf_dataset, tokenizer, query_field=query_field, answer_field=answer_field,
                    interactions_field=interactions_field, max_seq_len=max_seq_len,
                    ignore_index=ignore_index, **kwargs)
+
+
+class AutoregressiveLMIterableDataset(BaseIterableDataset):
+    """
+    Iterable version of AutoregressiveLMDataset for streaming datasets.
+
+    This dataset works with HuggingFace streaming datasets and is suitable
+    for large-scale datasets that don't fit in memory.
+    """
+
+    def __init__(
+            self,
+            hf_iterable_dataset: HfIterableDataset,
+            tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+            max_seq_len: int = 1024,
+            hf_field: str = 'text',
+            **kwargs
+    ):
+        super().__init__(hf_iterable_dataset, tokenizer, max_seq_len, hf_field, **kwargs)
+
+    def __iter__(self):
+        """
+        Iterate through the dataset, yielding tokenized examples.
+
+        Yields:
+            dict with keys 'input_ids', 'attention_mask', and 'targets'
+        """
+        tokenized_iterator = super().__iter__()
+
+        for tokenized_inputs in tokenized_iterator:
+            input_ids = tokenized_inputs['input_ids'][0]
+            attention_mask = tokenized_inputs['attention_mask'][0]
+            targets = input_ids.clone()
+
+            yield {
+                'input_ids': input_ids,
+                'attention_mask': attention_mask,
+                'targets': targets
+            }
+
+    @classmethod
+    def from_hf_hub(
+            cls,
+            dataset_id: str,
+            subset: str = None,
+            split: str = 'train',
+            target_field: str = 'text',
+            tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast] = None,
+            tokenizer_hub_id: str = None,
+            max_seq_len: int = 1024,
+            load_kwargs: dict = None,
+            load_tokenizer_kwargs: dict = None,
+            **kwargs
+    ):
+        """
+        Load streaming dataset from HuggingFace Hub for autoregressive language modeling.
+
+        Args:
+            dataset_id (str): Hub dataset repository name
+            subset (str): Dataset subset (default: None)
+            split (str): Dataset split (default: "train")
+            target_field (str): Name of dataset field used for training (default: "text")
+            tokenizer (Union[PreTrainedTokenizer, PreTrainedTokenizerFast]): HuggingFace Tokenizer (default: None)
+            tokenizer_hub_id (str): HuggingFace Hub ID of tokenizer to load (default: None)
+            max_seq_len (int): Maximum sequence length (default: 1024)
+            load_kwargs (dict): Additional args for HuggingFace API load_dataset function
+            load_tokenizer_kwargs (dict): Additional args for loading tokenizer
+            **kwargs: Additional args for the dataset class
+
+        Returns:
+            AutoregressiveLMIterableDataset instance
+        """
+        assert tokenizer is not None or tokenizer_hub_id is not None, \
+            "One of the `tokenizer` or `tokenizer_hub_id` args must be provided."
+
+        if load_kwargs is None:
+            load_kwargs = {}
+
+        if load_tokenizer_kwargs is None:
+            load_tokenizer_kwargs = {}
+
+        if tokenizer is None:
+            tokenizer = load_tokenizer_from_hf_hub(tokenizer_hub_id, **load_tokenizer_kwargs)
+
+        hf_dataset = load_dataset(
+            dataset_id,
+            name=subset,
+            split=split,
+            streaming=True,
+            **load_kwargs
+        )
+
+        return cls(hf_dataset, tokenizer, max_seq_len=max_seq_len, hf_field=target_field, **kwargs)
