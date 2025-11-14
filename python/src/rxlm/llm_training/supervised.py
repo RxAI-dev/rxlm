@@ -6,7 +6,7 @@ from typing import Union
 from sklearn.metrics import f1_score
 from ..training.base import BaseTrainer
 from .models import MLMTrainingModel
-from ..training.ddp import distributed_mean
+from ..training.ddp import distributed_mean, distributed_value_mean
 
 class MLMTrainer(BaseTrainer):
     def __init__(
@@ -264,3 +264,202 @@ class AutoregressiveTrainer(BaseTrainer):
             }
         self.model.train()
         return avg_loss, metrics
+
+
+class IterativeAutoregressiveTrainer(AutoregressiveTrainer):
+    """
+    AutoregressiveTrainer with batched collection and training for streaming datasets.
+
+    This trainer improves efficiency on large streaming datasets by:
+    1. Collecting N batches (with tokenization happening during collection)
+    2. Running training loop on the collected batches
+
+    This avoids CPU-bound bottlenecks from loading and tokenizing each batch
+    separately during the training loop.
+    """
+    def __init__(
+            self,
+            model: torch.nn.Module,
+            device: torch.device,
+            vocab_size: int,
+            collect_n_batches: int = 10000,
+            use_amp: bool = False,
+            dtype: torch.dtype = None,
+            use_moe_aux_loss: bool = False,
+            moe_aux_loss_scale: float = 0.01,
+            use_f1_metrics: bool = False,
+            is_sft: bool = False,
+            **kwargs
+    ):
+        super().__init__(
+            model=model,
+            device=device,
+            vocab_size=vocab_size,
+            use_amp=use_amp,
+            dtype=dtype,
+            use_moe_aux_loss=use_moe_aux_loss,
+            moe_aux_loss_scale=moe_aux_loss_scale,
+            use_f1_metrics=use_f1_metrics,
+            is_sft=is_sft,
+            **kwargs
+        )
+        self.collect_n_batches = collect_n_batches
+
+    def _run_epoch(
+            self,
+            dataloader: torch.utils.data.DataLoader,
+            epoch: int,
+            optimizer: torch.optim.Optimizer,
+            batch_size: int,
+            scaler: torch.cuda.amp.GradScaler = None,
+            scheduler: torch.optim.lr_scheduler.LRScheduler = None,
+    ) -> None:
+        for callback in self.callbacks:
+            callback.on_epoch_start(self.model, epoch)
+
+        self.accumulated_loss = torch.tensor(0.0, device=self.device)
+        self.optimizer_step_count = 0
+
+        accumulated_tokens = torch.tensor(0.0, device=self.device)
+
+        # Temporary list for collected batches
+        collected_batches = []
+        base_batch_idx = 0
+
+        for batch_idx, batch in enumerate(dataloader):
+            if not self.is_running:
+                break
+
+            # Collect phase: add batch to temporary list (tokenization happens here)
+            collected_batches.append(batch)
+
+            # When we've collected N batches, run training loop
+            if len(collected_batches) >= self.collect_n_batches:
+                self._train_on_collected_batches(
+                    collected_batches,
+                    optimizer,
+                    scaler,
+                    scheduler,
+                    accumulated_tokens,
+                    base_batch_idx
+                )
+                base_batch_idx = batch_idx + 1
+                # Clear collected batches
+                collected_batches = []
+
+                if not self.is_running:
+                    break
+
+        # Train on any remaining collected batches
+        if collected_batches and self.is_running:
+            self._train_on_collected_batches(
+                collected_batches,
+                optimizer,
+                scaler,
+                scheduler,
+                accumulated_tokens,
+                base_batch_idx
+            )
+
+        # Validation at the end of epoch
+        if self.validation_dataset:
+            self.validation_steps = 0
+            val_loss, val_metrics = self.validate(batch_size)
+            if self.use_ddp:
+                val_loss = distributed_value_mean(val_loss, device=self.device)
+
+            self.validation_metrics[epoch] = val_metrics
+
+            if self.writer:
+                self._valid_writer(epoch, val_loss, val_metrics)
+
+            for callback in self.callbacks:
+                should_stop = callback.on_validation_end(self.model, epoch, val_loss, val_metrics)
+                if should_stop:
+                    self.is_running = False
+
+        for callback in self.callbacks:
+            should_stop = callback.on_epoch_end(self.model, epoch)
+            if should_stop:
+                self.is_running = False
+
+        if self.writer:
+            self.writer.flush()
+
+    def _train_on_collected_batches(
+            self,
+            collected_batches: list,
+            optimizer: torch.optim.Optimizer,
+            scaler: torch.cuda.amp.GradScaler,
+            scheduler: torch.optim.lr_scheduler.LRScheduler,
+            accumulated_tokens: torch.Tensor,
+            base_batch_idx: int
+    ):
+        """Train on collected batches"""
+        for i, batch in enumerate(collected_batches):
+            if not self.is_running:
+                break
+
+            self.total_steps += 1
+            self.epoch_steps = base_batch_idx + i
+            accumulated_tokens += batch['attention_mask'].sum()
+
+            loss = self.train_step(batch, self.epoch_steps)
+            self.accumulated_loss += loss
+            loss = loss / self.gradient_accumulation_steps
+
+            if self.use_amp:
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
+
+            self.optimizer_step_count += 1
+            if self.optimizer_step_count % self.gradient_accumulation_steps == 0:
+                # Clip gradients after accumulation
+                if self.use_amp:
+                    scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0, error_if_nonfinite=False)
+                if self.use_amp:
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
+
+                optimizer.zero_grad()
+
+                if scheduler is not None:
+                    scheduler.step()
+
+                if self.writer and self.total_steps % self.tensorboard_interval == 0:
+                    loss_item = (self.accumulated_loss / self.gradient_accumulation_steps).item()
+                    self.writer.add_scalar(
+                        'Loss/train',
+                        loss_item,
+                        self.total_steps,
+                    )
+                    self.writer.add_scalar(
+                        'Loss/train last epoch',
+                        loss_item,
+                        self.epoch_steps
+                    )
+                    self.writer.add_scalar(
+                        'Perplexity/train',
+                        torch.exp(torch.tensor(loss_item)),
+                        self.total_steps,
+                    )
+
+                    self.total_tokens += accumulated_tokens.item()
+                    accumulated_tokens = torch.tensor(0.0, device=self.device)
+                    self.writer.add_scalar(
+                        'Processed tokens',
+                        self.total_tokens,
+                        self.total_steps
+                    )
+
+                self.accumulated_loss = torch.tensor(0.0, device=self.device)
+                self.optimizer_step_count = 0
+
+            for callback in self.callbacks:
+                should_stop = callback.on_batch_end(self.model, self.epoch_steps, loss, batch)
+                if should_stop:
+                    self.is_running = False
