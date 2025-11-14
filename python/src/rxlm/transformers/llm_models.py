@@ -44,16 +44,29 @@ class ClassicTransformerBase(nn.Module):
 class ClassicTransformerDecoder(ClassicTransformerBase):
     """Classic Transformer decoder - for decoder-only Transformer models"""
 
-    def __init__(self, embed_dim: int, vocab_size: int, use_head_norm: bool = False, init_identity_norm: bool = False, *args, **kwargs):
+    def __init__(self, embed_dim: int, vocab_size: int, use_head_norm: bool = False, init_identity_norm: bool = False, tie_embeddings: bool = False, head_norm_type: str = 'layer_norm', *args, **kwargs):
         super(ClassicTransformerDecoder, self).__init__(*args, **kwargs)
 
-        self.head = nn.Linear(embed_dim, vocab_size)
+        self.tie_embeddings = tie_embeddings
+
+        # When using tied embeddings, we don't create a head at all
+        # In forward pass, we'll compute logits as x @ embedding.weight.T (no bias)
+        if not tie_embeddings:
+            self.head = nn.Linear(embed_dim, vocab_size)
+        else:
+            self.head = None
+
         self.use_head_norm = use_head_norm
         if use_head_norm:
-            self.head_norm = nn.LayerNorm(embed_dim)
-            if init_identity_norm:
-                self.head_norm.weight.data.fill_(1.0)
-                self.head_norm.bias.data.fill_(0.0)
+            if head_norm_type == 'rms_norm':
+                self.head_norm = nn.RMSNorm(embed_dim)
+            elif head_norm_type == 'layer_norm':
+                self.head_norm = nn.LayerNorm(embed_dim)
+                if init_identity_norm:
+                    self.head_norm.weight.data.fill_(1.0)
+                    self.head_norm.bias.data.fill_(0.0)
+            else:
+                raise ValueError(f"head_norm_type must be 'layer_norm' or 'rms_norm', got '{head_norm_type}'")
         else:
             self.head_norm = None
 
@@ -76,7 +89,17 @@ class ClassicTransformerDecoder(ClassicTransformerBase):
         # Process layers
         for i in range(self.num_layers):
             x = self.layers[i](x, mask=mask, use_self_attn_cache=use_self_attn_cache, current_positions=current_positions)
-        return self.head(self.head_norm(x) if self.use_head_norm else x)
+
+        # Apply head normalization if enabled
+        if self.use_head_norm:
+            x = self.head_norm(x)
+
+        # Compute logits with tied embeddings or regular head
+        if self.tie_embeddings:
+            # Manual matmul with transposed embedding weights (no bias for symmetry)
+            return torch.matmul(x, self.embedding.weight.T)
+        else:
+            return self.head(x)
 
 
 class ClassicTransformerEncoder(ClassicTransformerBase):
