@@ -36,6 +36,8 @@ class DecoderOnlyTransformerConfig(TypedDict):
     att_window_size: int
     use_head_norm: bool
     init_identity_norm: bool
+    tie_embeddings: bool
+    head_norm_type: str
 
 
 class DecoderOnlyTransformer(nn.Module, PyTorchModelHubMixin, pipeline_tag="text-generation", license="apache-2.0"):
@@ -71,6 +73,8 @@ class DecoderOnlyTransformer(nn.Module, PyTorchModelHubMixin, pipeline_tag="text
             att_window_size: int = 128,
             use_head_norm: bool = False,
             init_identity_norm: bool = False,
+            tie_embeddings: bool = False,
+            head_norm_type: str = 'layer_norm',
             **kwargs
     ):
         super(DecoderOnlyTransformer, self).__init__(**kwargs)
@@ -119,6 +123,8 @@ class DecoderOnlyTransformer(nn.Module, PyTorchModelHubMixin, pipeline_tag="text
             use_flash_attention=use_flash_attention,
             use_head_norm=use_head_norm,
             init_identity_norm=init_identity_norm,
+            tie_embeddings=tie_embeddings,
+            head_norm_type=head_norm_type,
         )
 
     def params_count(self):
