@@ -167,7 +167,7 @@ class BaseTrainer(ABC):
         self.accumulated_loss = torch.tensor(0.0, device=self.device)
         self.optimizer_step_count = 0
 
-        accumulated_tokens = torch.tensor(0.0, device=self.device)
+        accumulated_tokens = torch.tensor(0, device=self.device, dtype=torch.long)
 
         for batch_idx, batch in enumerate(dataloader):
             if not self.is_running:
@@ -222,7 +222,7 @@ class BaseTrainer(ABC):
                         )
 
                         self.total_tokens += accumulated_tokens.item()
-                        accumulated_tokens = torch.tensor(0.0, device=self.device)
+                        accumulated_tokens = torch.tensor(0, device=self.device, dtype=torch.long)
                         self.writer.add_scalar(
                             'Processed tokens',
                             self.total_tokens,

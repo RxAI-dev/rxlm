@@ -236,8 +236,9 @@ class SupervisedMemoryAttentionTrainer(BaseTrainer):
         )
 
         acc_weight, new_weight = weights
-        labels = (acc_weight * accumulated_stm + new_weight * new_stm_state) + label_noise * torch.randn_like(
-            new_stm_state)
+        labels = (acc_weight * accumulated_stm + new_weight * encoded_layers_data) + label_noise * torch.randn_like(
+            encoded_layers_data
+        )
 
         cosine_sim = F.cosine_similarity(
             new_stm_state,

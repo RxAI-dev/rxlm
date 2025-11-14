@@ -282,7 +282,7 @@ class IterativeAutoregressiveTrainer(AutoregressiveTrainer):
             model: torch.nn.Module,
             device: torch.device,
             vocab_size: int,
-            collect_n_batches: int = 10000,
+            collect_n_batches: int = 1000,
             use_amp: bool = False,
             dtype: torch.dtype = None,
             use_moe_aux_loss: bool = False,
@@ -320,7 +320,7 @@ class IterativeAutoregressiveTrainer(AutoregressiveTrainer):
         self.accumulated_loss = torch.tensor(0.0, device=self.device)
         self.optimizer_step_count = 0
 
-        accumulated_tokens = torch.tensor(0.0, device=self.device)
+        accumulated_tokens = torch.tensor(0, device=self.device, dtype=torch.long)
 
         # Temporary list for collected batches
         collected_batches = []
@@ -449,7 +449,7 @@ class IterativeAutoregressiveTrainer(AutoregressiveTrainer):
                     )
 
                     self.total_tokens += accumulated_tokens.item()
-                    accumulated_tokens = torch.tensor(0.0, device=self.device)
+                    accumulated_tokens = torch.tensor(0, device=self.device, dtype=torch.long)
                     self.writer.add_scalar(
                         'Processed tokens',
                         self.total_tokens,
