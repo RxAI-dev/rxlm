@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional
-from torch.nn.attention import sdpa_kernel, SDPBackend
 import math
 from .positional import RotaryPositionalEmbedding, RelativePositionalEmbedding
 
