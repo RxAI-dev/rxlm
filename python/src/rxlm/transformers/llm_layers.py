@@ -19,6 +19,7 @@ class ClassicTransformerLayer(nn.Module):
             use_gated: bool = False,
             use_moe: bool = False,
             num_experts: int = 1,
+            num_shared_experts: int = 0,
             moe_top_k: int = 1,
             use_moe_att: bool = False,
             *args,
@@ -31,13 +32,13 @@ class ClassicTransformerLayer(nn.Module):
         if use_gated:
             if use_moe:
                 self.ff = GatedMoeFeedForward(embed_dim, ff_dim, num_experts, ff_activation, top_k=moe_top_k,
-                                              dropout=ff_dropout)
+                                              dropout=ff_dropout, num_shared_experts=num_shared_experts)
             else:
                 self.ff = GatedFeedForward(embed_dim, ff_dim, ff_activation, dropout=ff_dropout)
         else:
             if use_moe:
                 self.ff = MoeFeedForward(embed_dim, ff_dim, num_experts, ff_activation, top_k=moe_top_k,
-                                         dropout=ff_dropout)
+                                         dropout=ff_dropout, num_shared_experts=num_shared_experts)
             else:
                 self.ff = FeedForward(embed_dim, ff_dim, ff_activation, dropout=ff_dropout)
 

@@ -28,6 +28,7 @@ class DecoderOnlyTransformerConfig(TypedDict):
     use_moe_ff: bool
     ff_num_experts: int
     ff_moe_top_k: int
+    ff_num_shared_experts: int
     att_type: str
     att_num_experts: int
     att_num_query_experts: int
@@ -55,7 +56,7 @@ class DecoderOnlyTransformer(nn.Module, PyTorchModelHubMixin, pipeline_tag="text
             ff_dim: int = 384,
             att_heads: int = 16,
             seq_len: int = 256,
-            use_flash_attention: bool = True,
+            use_flash_attention: bool = False,
             use_gated: bool = True,
             ff_activation: str = "swish",
             ff_dropout: float = 0.0,
@@ -65,7 +66,10 @@ class DecoderOnlyTransformer(nn.Module, PyTorchModelHubMixin, pipeline_tag="text
             use_moe_ff: bool = False,
             ff_num_experts: int = 1,
             ff_moe_top_k: int = 1,
-            att_type: str = 'gma',
+            ff_num_shared_experts: int = 0,
+            num_initial_dense_layers: int = 0,
+            dense_ff_dim: int = 384,
+            att_type: str = 'sqa',
             att_num_experts: int = None,
             att_num_query_experts: int = None,
             att_num_query_groups: int = None,
@@ -101,25 +105,41 @@ class DecoderOnlyTransformer(nn.Module, PyTorchModelHubMixin, pipeline_tag="text
 
         use_moe_att = att_type in ['gma', 'dma']
 
-        self.model = ClassicTransformerDecoder(
-            embed_dim,
-            vocab_size,
-            embedding=embedding,
-            layers=nn.ModuleList([
-                ClassicTransformerLayer(
+        def layer_init(i: int):
+            if i < num_initial_dense_layers:
+                return ClassicTransformerLayer(
+                    embed_dim,
+                    dense_ff_dim,
+                    use_gated=use_gated,
+                    use_moe=False,
+                    ff_activation=ff_activation,
+                    ff_dropout=ff_dropout,
+                    use_rms_norm=use_rms_norm,
+                    self_attention=att_init(),
+                    use_moe_att=use_moe_att,
+                )
+            else:
+                return ClassicTransformerLayer(
                     embed_dim,
                     ff_dim,
                     use_gated=use_gated,
                     use_moe=use_moe_ff,
                     num_experts=ff_num_experts,
+                    num_shared_experts=ff_num_shared_experts,
                     moe_top_k=ff_moe_top_k,
                     ff_activation=ff_activation,
                     ff_dropout=ff_dropout,
                     use_rms_norm=use_rms_norm,
                     self_attention=att_init(),
                     use_moe_att=use_moe_att,
-                ) for _ in range(num_layers)
-            ]),
+                )
+
+
+        self.model = ClassicTransformerDecoder(
+            embed_dim,
+            vocab_size,
+            embedding=embedding,
+            layers=nn.ModuleList([layer_init(i) for i in range(num_layers)]),
             use_flash_attention=use_flash_attention,
             use_head_norm=use_head_norm,
             init_identity_norm=init_identity_norm,
