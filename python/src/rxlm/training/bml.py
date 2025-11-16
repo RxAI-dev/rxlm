@@ -223,3 +223,308 @@ class JointLMTrainer(BaseTrainer):
         }
         self.model.train()
         return avg_loss, metrics
+
+
+class IterativeJointLMTrainer(JointLMTrainer):
+    """
+    JointLMTrainer with batched collection and training for streaming datasets.
+
+    This trainer improves efficiency on large streaming datasets by:
+    1. Collecting N batches (with tokenization happening during collection)
+    2. Running training loop on the collected batches
+
+    This avoids CPU-bound bottlenecks from loading and tokenizing each batch
+    separately during the training loop.
+    """
+    def __init__(
+            self,
+            model: JointTrainingModel,
+            device: torch.device,
+            vocab_size: int,
+            collect_n_batches: int = 1000,
+            use_amp: bool = False,
+            dtype: torch.dtype = None,
+            components_loss_log_interval: int = None,
+            encoder_loss_scale: float = 1.0,
+            decoder_loss_scale: float = 1.0,
+            use_moe_aux_loss: bool = False,
+            moe_aux_loss_scale: float = 0.01,
+            fake_stm_noise_level: float = None,
+            is_sft: bool = False,
+            use_te_fp8: bool = False,
+            fp8_history_len: int = 256,
+            fp8_margin: int = 0,
+            collect_log_interval: int = 100,
+            use_iterable_dataset: bool = True,
+            **kwargs
+    ):
+        super().__init__(
+            model=model,
+            device=device,
+            vocab_size=vocab_size,
+            use_amp=use_amp,
+            dtype=dtype,
+            components_loss_log_interval=components_loss_log_interval,
+            encoder_loss_scale=encoder_loss_scale,
+            decoder_loss_scale=decoder_loss_scale,
+            use_moe_aux_loss=use_moe_aux_loss,
+            moe_aux_loss_scale=moe_aux_loss_scale,
+            fake_stm_noise_level=fake_stm_noise_level,
+            is_sft=is_sft,
+            use_iterable_dataset=use_iterable_dataset,
+            **kwargs
+        )
+        self.collect_n_batches = collect_n_batches
+        self.use_te_fp8 = use_te_fp8
+        self.collect_log_interval = collect_log_interval
+        if use_te_fp8:
+            self.use_amp = False
+
+            import transformer_engine.pytorch as te
+            from transformer_engine.common import recipe
+
+            self.fp8_recipe = recipe.DelayedScaling(
+                fp8_format=recipe.Format.HYBRID,
+                amax_history_len=fp8_history_len,
+                amax_compute_algo='max',
+                margin=fp8_margin,
+            )
+        else:
+            self.fp8_recipe = None
+
+    def _run_epoch(
+            self,
+            dataloader: torch.utils.data.DataLoader,
+            epoch: int,
+            optimizer: torch.optim.Optimizer,
+            batch_size: int,
+            scaler: torch.cuda.amp.GradScaler = None,
+            scheduler: torch.optim.lr_scheduler.LRScheduler = None,
+    ) -> None:
+        for callback in self.callbacks:
+            callback.on_epoch_start(self.model, epoch)
+
+        self.accumulated_loss = torch.tensor(0.0, device=self.device)
+        self.optimizer_step_count = 0
+
+        accumulated_tokens = torch.tensor(0, device=self.device, dtype=torch.long)
+
+        # Temporary list for collected batches
+        collected_batches = []
+        base_batch_idx = 0
+        collect_idx = 1
+
+        for batch_idx, batch in enumerate(dataloader):
+            if not self.is_running:
+                break
+
+            # Collect phase: add batch to temporary list (tokenization happens here)
+            collected_batches.append(batch)
+            collect_idx = collect_idx + 1
+            if collect_idx % self.collect_log_interval == 0:
+                print(f'Collect & tokenize batch: {collect_idx} / {self.collect_n_batches}')
+
+            # When we've collected N batches, run training loop
+            if len(collected_batches) >= self.collect_n_batches:
+                print(f'Train on collected: {self.collect_n_batches} batches')
+                self._train_on_collected_batches(
+                    collected_batches,
+                    optimizer,
+                    scaler,
+                    scheduler,
+                    accumulated_tokens,
+                    base_batch_idx,
+                    batch_size
+                )
+                base_batch_idx = batch_idx + 1
+                # Clear collected batches
+                collected_batches = []
+                collect_idx = 1
+
+                if not self.is_running:
+                    break
+
+        # Train on any remaining collected batches
+        if collected_batches and self.is_running:
+            self._train_on_collected_batches(
+                collected_batches,
+                optimizer,
+                scaler,
+                scheduler,
+                accumulated_tokens,
+                base_batch_idx,
+                batch_size
+            )
+
+        # Validation at the end of epoch
+        if self.validation_dataset:
+            self.validation_steps = 0
+            val_loss, val_metrics = self.validate(batch_size)
+            if self.use_ddp:
+                from .ddp import distributed_value_mean
+                val_loss = distributed_value_mean(val_loss, device=self.device)
+
+            self.validation_metrics[epoch] = val_metrics
+
+            if self.writer:
+                self._valid_writer(epoch, val_loss, val_metrics)
+
+            for callback in self.callbacks:
+                should_stop = callback.on_validation_end(self.model, epoch, val_loss, val_metrics)
+                if should_stop:
+                    self.is_running = False
+
+        for callback in self.callbacks:
+            should_stop = callback.on_epoch_end(self.model, epoch)
+            if should_stop:
+                self.is_running = False
+
+        if self.writer:
+            self.writer.flush()
+
+    def _train_on_collected_batches(
+            self,
+            collected_batches: list,
+            optimizer: torch.optim.Optimizer,
+            scaler: torch.cuda.amp.GradScaler,
+            scheduler: torch.optim.lr_scheduler.LRScheduler,
+            accumulated_tokens: torch.Tensor,
+            base_batch_idx: int,
+            batch_size: int
+    ):
+        """Train on collected batches"""
+        for i, batch in enumerate(collected_batches):
+            if not self.is_running:
+                break
+            if self.get_batch_size(batch) == batch_size:
+                self.total_steps += 1
+                self.epoch_steps = base_batch_idx + i + 1
+                accumulated_tokens += batch['attention_mask'].sum()
+
+                loss = self.train_step(batch, self.epoch_steps)
+                self.accumulated_loss += loss
+                loss = loss / self.gradient_accumulation_steps
+
+                if self.use_amp:
+                    scaler.scale(loss).backward()
+                else:
+                    loss.backward()
+
+                self.optimizer_step_count += 1
+                if self.optimizer_step_count % self.gradient_accumulation_steps == 0:
+                    # Clip gradients after accumulation
+                    if self.use_amp:
+                        scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0, error_if_nonfinite=False)
+                    if self.use_amp:
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        optimizer.step()
+
+                    optimizer.zero_grad()
+
+                    if scheduler is not None:
+                        scheduler.step()
+
+                    if self.writer and self.total_steps % self.tensorboard_interval == 0:
+                        loss_item = (self.accumulated_loss / self.gradient_accumulation_steps).item()
+                        self.writer.add_scalar(
+                            'Loss/train',
+                            loss_item,
+                            self.total_steps,
+                        )
+                        self.writer.add_scalar(
+                            'Loss/train last epoch',
+                            loss_item,
+                            self.epoch_steps
+                        )
+                        self.writer.add_scalar(
+                            'Perplexity/train',
+                            torch.exp(torch.tensor(loss_item)),
+                            self.total_steps,
+                        )
+
+                        self.total_tokens += accumulated_tokens.item()
+                        accumulated_tokens = torch.tensor(0, device=self.device, dtype=torch.long)
+                        self.writer.add_scalar(
+                            'Processed tokens',
+                            self.total_tokens,
+                            self.total_steps
+                        )
+
+                    self.accumulated_loss = torch.tensor(0.0, device=self.device)
+                    self.optimizer_step_count = 0
+
+                for callback in self.callbacks:
+                    should_stop = callback.on_batch_end(self.model, self.epoch_steps, loss, batch)
+                    if should_stop:
+                        self.is_running = False
+
+    def train_step(self, batch: dict[str, Union[torch.Tensor, dict[torch.Tensor]]], batch_idx: int) -> torch.Tensor:
+        if self.use_amp:
+            batch = {
+                k: (
+                    {kk: vv.to(self.device) for kk, vv in v.items()} if not torch.is_tensor(v) else v.to(self.device)
+                ) for k, v in batch.items()
+            }
+            with torch.amp.autocast(device_type=self.device.type, dtype=self.dtype):
+                (encoder_loss, decoder_loss), _ = self.compute_loss(batch)
+        elif self.use_te_fp8 and self.fp8_recipe:
+            batch = {
+                k: (
+                    {kk: vv.to(self.device) for kk, vv in v.items()} if not torch.is_tensor(v) else v.to(self.device)
+                ) for k, v in batch.items()
+            }
+            import transformer_engine.pytorch as te
+            with te.fp8_autocast(enabled=True, fp8_recipe=self.fp8_recipe):
+                (encoder_loss, decoder_loss), _ = self.compute_loss(batch)
+        else:
+            batch = {
+                k: (
+                    {kk: vv.to(self.device, dtype=self.dtype) for kk, vv in v.items()} if not torch.is_tensor(v) else v.to(self.device, dtype=self.dtype)
+                ) for k, v in batch.items()
+            }
+            (encoder_loss, decoder_loss), _ = self.compute_loss(batch)
+
+        if self.components_loss_log_interval is not None:
+            if batch_idx % self.components_loss_log_interval == 0:
+                print(f"Encoder loss: {encoder_loss.item():.4f}")
+                print(f"Decoder loss: {decoder_loss.item():.4f}")
+                if self.encoder_loss_scale != 1.0:
+                    print(
+                        f"Encoder loss scaled by {self.encoder_loss_scale}: {(encoder_loss * self.encoder_loss_scale).item():.4f}")
+                if self.decoder_loss_scale != 1.0:
+                    print(
+                        f"Decoder loss scaled by {self.decoder_loss_scale}: {(decoder_loss * self.decoder_loss_scale).item():.4f}")
+
+        return (encoder_loss * self.encoder_loss_scale) + (decoder_loss * self.decoder_loss_scale)
+
+    def valid_step(self, batch: dict[str, Union[torch.Tensor, dict[torch.Tensor]]]) -> tuple[
+        tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
+        if self.use_amp:
+            batch = {
+                k: (
+                    {kk: vv.to(self.device) for kk, vv in v.items()} if not torch.is_tensor(v) else v.to(self.device)
+                ) for k, v in batch.items()
+            }
+            with torch.amp.autocast(device_type=self.device.type, dtype=self.dtype):
+                (encoder_loss, decoder_loss), (encoder_logits, decoder_logits) = self.compute_loss(batch)
+        elif self.use_te_fp8 and self.fp8_recipe:
+            batch = {
+                k: (
+                    {kk: vv.to(self.device) for kk, vv in v.items()} if not torch.is_tensor(v) else v.to(self.device)
+                ) for k, v in batch.items()
+            }
+            import transformer_engine.pytorch as te
+            with te.fp8_autocast(enabled=True, fp8_recipe=self.fp8_recipe):
+                (encoder_loss, decoder_loss), (encoder_logits, decoder_logits) = self.compute_loss(batch)
+        else:
+            batch = {
+                k: (
+                    {kk: vv.to(self.device, dtype=self.dtype) for kk, vv in v.items()} if not torch.is_tensor(v) else v.to(self.device, dtype=self.dtype)
+                ) for k, v in batch.items()
+            }
+            (encoder_loss, decoder_loss), (encoder_logits, decoder_logits) = self.compute_loss(batch)
+
+        return (encoder_loss, decoder_loss), (encoder_logits, decoder_logits)
