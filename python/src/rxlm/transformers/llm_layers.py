@@ -54,6 +54,7 @@ class ClassicTransformerLayer(nn.Module):
             self.norm2 = nn.LayerNorm(embed_dim)
         self.use_post_norm = use_post_norm
         self.use_moe = use_moe
+        self.moe_top_k = moe_top_k
         self.use_moe_att = use_moe_att
 
     def moe_router_loss(self):
@@ -68,6 +69,18 @@ class ClassicTransformerLayer(nn.Module):
             return att_router_loss
         else:
             return None
+
+    def active_parameters(self) -> list[nn.Parameter]:
+        if not self.use_moe:
+            return list(self.parameters())
+        else:
+            attn_params = list(self.attention.parameters()) + list(self.norm1.parameters())
+            ff_norm_params = list(self.norm3.parameters())
+            router_params = list(self.ff.router.parameters())
+            active_expert_params = []
+            for i in range(self.moe_top_k):
+                active_expert_params.extend(list(self.ff.experts[i].parameters()))
+            return attn_params + ff_norm_params + router_params + active_expert_params
 
     def update_max_len(self, max_seq_len: int):
         if self.attention.rope is not None:

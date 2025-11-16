@@ -108,6 +108,13 @@ class ReactiveTransformerDecoder(ReactiveTransformerBase):
             head_params += list(self.head_norm.parameters())
         return stateless_params + layer_params + head_params
 
+    def active_parameters(self) -> list[nn.Parameter]:
+        stateless = [param for layer in self.stateless_layers for param in layer.active_parameters()] if self.stateless_layers is not None else []
+        head_params = list(self.head.parameters())
+        if self.use_head_norm:
+            head_params += list(self.head_norm.parameters())
+        return super().active_parameters() + stateless + head_params
+
     def moe_router_loss(self):
         if self.use_moe:
             if self.stateless_layers is not None:
