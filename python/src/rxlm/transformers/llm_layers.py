@@ -75,7 +75,7 @@ class ClassicTransformerLayer(nn.Module):
             return list(self.parameters())
         else:
             attn_params = list(self.attention.parameters()) + list(self.norm1.parameters())
-            ff_norm_params = list(self.norm3.parameters())
+            ff_norm_params = list(self.norm2.parameters())
             router_params = list(self.ff.router.parameters())
             active_expert_params = []
             for i in range(self.moe_top_k):
