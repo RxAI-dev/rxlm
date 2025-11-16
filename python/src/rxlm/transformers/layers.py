@@ -67,6 +67,7 @@ class ReactiveTransformerLayer(nn.Module):
 
         self.use_post_norm = use_post_norm
         self.use_moe = use_moe
+        self.moe_top_k = moe_top_k
         self.use_moe_att = use_moe_att
 
     def trainable_cross_attention_(self, is_trainable: bool, with_norms: bool = True):
@@ -88,6 +89,19 @@ class ReactiveTransformerLayer(nn.Module):
     def not_memory_parameters(self) -> list[nn.Parameter]:
         return (list(self.attention.parameters()) + list(self.norm1.parameters()) +
                 list(self.norm3.parameters()) + list(self.ff.parameters()))
+
+    def active_parameters(self) -> list[nn.Parameter]:
+        if not self.use_moe:
+            return list(self.parameters())
+        else:
+            mem_params = self.memory_parameters()
+            attn_params = list(self.attention.parameters()) + list(self.norm1.parameters())
+            ff_norm_params = list(self.norm3.parameters())
+            router_params = list(self.ff.router.parameters())
+            active_expert_params = []
+            for i in range(self.moe_top_k):
+                active_expert_params.extend(list(self.ff.experts[i].parameters()))
+            return mem_params + attn_params + ff_norm_params + router_params + active_expert_params
 
     def update_max_len(self, max_seq_len: int):
         if self.attention.rope is not None:

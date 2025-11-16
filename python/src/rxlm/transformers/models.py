@@ -51,6 +51,11 @@ class ReactiveTransformerBase(nn.Module):
         shared = [param for layer in self.shared_layers for param in layer.not_memory_parameters()] if self.shared_layers else []
         return own + shared
 
+    def active_parameters(self) -> list[nn.Parameter]:
+        own = [param for layer in self.layers for param in layer.active_parameters()]
+        shared = [param for layer in self.shared_layers for param in layer.active_parameters()] if self.shared_layers else []
+        return own + shared
+
     def moe_router_loss(self):
         if self.use_moe:
             return torch.stack([self.layers[i].moe_router_loss() for i in range(self.num_own_layers) if self.layers[i].use_moe or self.layers[i].use_moe_att] + [
@@ -79,7 +84,9 @@ class ReactiveTransformerBase(nn.Module):
 class ReactiveTransformerDecoder(ReactiveTransformerBase):
     """Reactive Transformer decoder - extending the classic Transformer decoder with Memory Cross-Attention"""
 
-    def __init__(self, embed_dim: int, vocab_size: int, use_head_norm: bool = False, init_identity_norm: bool = False, *args, **kwargs):
+    def __init__(
+            self, embed_dim: int, vocab_size: int, use_head_norm: bool = False,
+            init_identity_norm: bool = False, stateless_layers: nn.ModuleList = None,  *args, **kwargs):
         super(ReactiveTransformerDecoder, self).__init__(*args, **kwargs)
 
         self.head = nn.Linear(embed_dim, vocab_size)
@@ -91,13 +98,26 @@ class ReactiveTransformerDecoder(ReactiveTransformerBase):
                 self.head_norm.bias.data.fill_(0.0)
         else:
             self.head_norm = None
+        self.stateless_layers = stateless_layers
 
     def not_memory_parameters(self) -> list[nn.Parameter]:
         layer_params = super().not_memory_parameters()
+        stateless_params = [param for layer in self.stateless_layers for param in layer.parameters()]
         head_params = list(self.head.parameters())
         if self.use_head_norm:
             head_params += list(self.head_norm.parameters())
-        return layer_params + head_params
+        return stateless_params + layer_params + head_params
+
+    def moe_router_loss(self):
+        if self.use_moe:
+            if self.stateless_layers is not None:
+                return torch.stack([layer.moe_router_loss() for layer in self.stateless_layers if layer.use_moe] + [self.layers[i].moe_router_loss() for i in range(self.num_own_layers) if self.layers[i].use_moe or self.layers[i].use_moe_att] + [
+                    self.shared_layers[i].moe_router_loss() for i in range(self.num_shared_layers) if self.shared_layers[i].use_moe or self.shared_layers[i].use_moe_att]).mean()
+            else:
+                return torch.stack([self.layers[i].moe_router_loss() for i in range(self.num_own_layers) if self.layers[i].use_moe or self.layers[i].use_moe_att] + [
+                    self.shared_layers[i].moe_router_loss() for i in range(self.num_shared_layers) if self.shared_layers[i].use_moe or self.shared_layers[i].use_moe_att]).mean()
+        else:
+            return None
 
     def prepare_stm_kv_cache(self) -> list[tuple[torch.Tensor, torch.Tensor]]:
         stm_kv_cache = []
@@ -129,6 +149,8 @@ class ReactiveTransformerDecoder(ReactiveTransformerBase):
         return stm_kv_cache
 
     def reset_self_attn_cache(self):
+        for layer in self.stateless_layers:
+            layer.attention.reset_inner_cache()
         for i in range(self.num_shared_layers):
             self.shared_layers[i].attention.reset_inner_cache()
         for i in range(self.num_own_layers):
@@ -145,6 +167,11 @@ class ReactiveTransformerDecoder(ReactiveTransformerBase):
             mask = attention_mask.unsqueeze(1).unsqueeze(1).bool()
         else:
             mask = None
+        # Process stateless layers
+        if self.stateless_layers is not None:
+            for layer in self.stateless_layers:
+                x = layer(x, mask=mask, use_self_attn_cache=use_self_attn_cache, current_positions=current_positions)
+
         # Process shared layers
         if self.shared_layers is not None:
             for i in range(self.num_shared_layers):

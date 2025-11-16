@@ -11,6 +11,7 @@ from ..transformers.layers import ReactiveTransformerLayer
 from ..transformers.models import ReactiveTransformerBase, ReactiveTransformerEncoder, ReactiveTransformerDecoder
 from ..transformers.ff import get_activation_layer
 from ..transformers.sampler import sample, sample_batch
+from ..transformers.llm_layers import ClassicTransformerLayer
 from ..memory.stm import ShortTermMemory
 from ..memory.norm import init_memory_norm
 from ..memory.attention import StmMemoryAttention, InterlayerStmMemoryAttention, SelfStmMemoryAttention, SelfInterlayerStmMemoryAttention
@@ -82,6 +83,8 @@ class RxTComponentBase(nn.Module):
             use_head_norm: bool = False,
             init_identity_norm: bool = False,
             skip_memory_cross_attention: bool = False,
+            stateless_layers_config: list[Literal['dense', 'moe']] = None,
+            dense_layer_dim: int = 1536,
             **kwargs
     ):
         super(RxTComponentBase, self).__init__(**kwargs)
@@ -130,6 +133,39 @@ class RxTComponentBase(nn.Module):
                                                                      num_query_groups=cross_att_query_groups or att_query_groups,
                                                                      rope_only_for_query=True)
 
+            if stateless_layers_config is not None:
+                def stateless_layer_init(layer_type: Literal['dense', 'moe']):
+                    if layer_type == 'dense':
+                        return ClassicTransformerLayer(
+                            embed_dim,
+                            dense_layer_dim,
+                            use_gated=use_gated,
+                            use_moe=False,
+                            ff_activation=ff_activation,
+                            ff_dropout=ff_dropout,
+                            use_rms_norm=use_rms_norm,
+                            self_attention=att_init(),
+                        )
+                    else:
+                        return ClassicTransformerLayer(
+                            embed_dim,
+                            ff_dim,
+                            use_gated=use_gated,
+                            use_moe=use_moe,
+                            num_experts=num_experts,
+                            moe_top_k=moe_top_k,
+                            ff_activation=ff_activation,
+                            ff_dropout=ff_dropout,
+                            use_rms_norm=use_rms_norm,
+                            self_attention=att_init(),
+                        )
+
+                stateless_layers = nn.ModuleList([
+                    stateless_layer_init(layer_type) for layer_type in stateless_layers_config
+                ])
+            else:
+                stateless_layers = None
+
             layers = nn.ModuleList([
                 ReactiveTransformerLayer(
                     embed_dim,
@@ -162,15 +198,16 @@ class RxTComponentBase(nn.Module):
                     skip_memory_cross_attention=skip_memory_cross_attention,
                 ) for _ in range(num_layers)
             ])
+            stateless_layers = None
 
         self.model = self._init_model(
             stm, layers, embedding, use_flash_attention, embed_dim, vocab_size, use_moe,
-            use_head_norm=use_head_norm, init_identity_norm=init_identity_norm,
+            use_head_norm=use_head_norm, init_identity_norm=init_identity_norm, stateless_layers=stateless_layers
         )
 
     def _init_model(self, stm: ShortTermMemory, layers: nn.ModuleList, embedding: nn.Embedding,
                     use_flash_attention: bool, embed_dim: int, vocab_size: int, use_moe: bool,
-                    use_head_norm: bool = False, init_identity_norm: bool = False) -> ReactiveTransformerBase:
+                    use_head_norm: bool = False, init_identity_norm: bool = False, stateless_layers: nn.ModuleList = None) -> ReactiveTransformerBase:
         pass
 
     def params_count(self):
@@ -187,6 +224,9 @@ class RxTComponentBase(nn.Module):
 
     def not_memory_parameters(self) -> list[nn.Parameter]:
         return self.model.not_memory_parameters()
+
+    def active_parameters(self) -> list[nn.Parameter]:
+        return self.model.active_parameters()
 
     def freeze_without_memory(self, unfreeze_norms: bool = True):
         for param in self.model.parameters():
@@ -233,6 +273,7 @@ class RxTEncoderComponent(RxTComponentBase):
             use_moe: bool,
             use_head_norm: bool = False,
             init_identity_norm: bool = False,
+            stateless_layers: nn.ModuleList = None,
     ) -> ReactiveTransformerEncoder:
         return ReactiveTransformerEncoder(
             stm=stm,
@@ -262,6 +303,7 @@ class RxTDecoderComponent(RxTComponentBase):
             use_moe: bool,
             use_head_norm: bool = False,
             init_identity_norm: bool = False,
+            stateless_layers: nn.ModuleList = None,
     ) -> ReactiveTransformerDecoder:
         return ReactiveTransformerDecoder(
             embed_dim,
@@ -273,6 +315,7 @@ class RxTDecoderComponent(RxTComponentBase):
             use_moe=use_moe,
             use_head_norm=use_head_norm,
             init_identity_norm=init_identity_norm,
+            stateless_layers=stateless_layers,
         )
 
     def forward(self, x: torch.Tensor, attention_mask: torch.Tensor = None, stm_kv_cache: list[tuple[torch.Tensor, torch.Tensor]] = None, use_self_attn_cache: bool = False, current_positions: torch.Tensor = None) -> tuple[torch.Tensor, torch.Tensor]:
