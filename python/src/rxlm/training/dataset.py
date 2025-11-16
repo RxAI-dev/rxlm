@@ -1,8 +1,9 @@
 import torch
-from torch.utils.data import Dataset, IterableDataset
+from torch.utils.data import Dataset, IterableDataset, get_worker_info
 from datasets import Dataset as HfDataset, load_dataset, concatenate_datasets, IterableDataset as HfIterableDataset
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from .tokenizer import load_tokenizer_from_hf_hub
+import torch.distributed as dist
 
 from typing import Union, TypedDict, Optional, TypeAlias, Any, Literal
 
@@ -1291,7 +1292,7 @@ class BaseIterableDataset(IterableDataset):
         return inputs
 
     def __iter__(self):
-        for example in self.hf_dataset:
+        for idx, example in enumerate(self.hf_dataset):
             text = example[self.hf_field]
             yield self.tokenize_text(text)
 

@@ -42,6 +42,7 @@ class MoeRouter(nn.Module):
 
         return loss
 
+    @torch._dynamo.disable
     def forward(self, x: torch.Tensor):
         # Input shape: [batch*seq_len, embed_dim]
         logits = self.gate(x)
@@ -128,7 +129,7 @@ class MoeFeedForward(nn.Module):
             # Simple loop over top-k experts for single token
             final_output = torch.zeros_like(x)
             for k in range(self.top_k):
-                expert_idx = selected_experts[0, k].item()
+                expert_idx = selected_experts[0, k]
                 weight = routing_weights[0, k]
                 expert_output = self.experts[expert_idx](x)
                 final_output += weight * expert_output
@@ -161,7 +162,7 @@ class MoeFeedForward(nn.Module):
             start_idx = 0
             # Efficient expert loop
             for i in range(self.num_experts):
-                num_tokens_for_expert = tokens_per_expert[i].item()
+                num_tokens_for_expert = tokens_per_expert[i]
                 if num_tokens_for_expert == 0:
                     continue  # Skip empty experts
 

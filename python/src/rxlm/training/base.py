@@ -109,16 +109,15 @@ class BaseTrainer(ABC):
 
         if self.use_ddp:
             rank, world_size = get_os_ddp_config()
-            dist.init_process_group(backend='nccl', rank=rank, world_size=world_size)
             self.model = DistributedDataParallel(self.model, device_ids=[self.device.index], find_unused_parameters=ddp_find_unused_parameters)
-            train_sampler = torch.utils.data.DistributedSampler(dataset, shuffle=not self.use_iterable_dataset and self.ddp_shuffle, rank=rank, num_replicas=world_size, drop_last=True)
+            train_sampler = torch.utils.data.DistributedSampler(dataset, shuffle=not self.use_iterable_dataset and self.ddp_shuffle, rank=rank, num_replicas=world_size, drop_last=True) if not self.use_iterable_dataset else None
             dataloader = torch.utils.data.DataLoader(
                 dataset,
                 batch_size=batch_size,
                 sampler=train_sampler,
                 pin_memory=True,
                 collate_fn=self.dataset_collate_fn,
-                num_workers=world_size * 4,
+                num_workers=world_size * self.num_dataloader_workers,
             )
         else:
             train_sampler = None
@@ -129,6 +128,7 @@ class BaseTrainer(ABC):
                 pin_memory=True,
                 collate_fn=self.dataset_collate_fn,
                 drop_last=True,
+                num_workers=self.num_dataloader_workers,
             )
 
         scaler = torch.amp.GradScaler() if self.use_amp else None

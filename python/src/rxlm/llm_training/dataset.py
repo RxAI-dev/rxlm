@@ -1,6 +1,7 @@
 import torch
 from datasets import load_dataset, Dataset as HfDataset, IterableDataset as HfIterableDataset
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, get_worker_info
+import torch.distributed as dist
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from typing import Union, TypeAlias, Literal
 from ..training.dataset import BaseDataset, BaseIterableDataset
