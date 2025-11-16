@@ -305,6 +305,7 @@ class IterativeAutoregressiveTrainer(AutoregressiveTrainer):
             moe_aux_loss_scale=moe_aux_loss_scale,
             use_f1_metrics=use_f1_metrics,
             is_sft=is_sft,
+            use_iterable_dataset=True,
             **kwargs
         )
         self.collect_n_batches = collect_n_batches
@@ -422,7 +423,7 @@ class IterativeAutoregressiveTrainer(AutoregressiveTrainer):
                 break
 
             self.total_steps += 1
-            self.epoch_steps = base_batch_idx + i
+            self.epoch_steps = base_batch_idx + i + 1
             accumulated_tokens += batch['attention_mask'].sum()
 
             loss = self.train_step(batch, self.epoch_steps)

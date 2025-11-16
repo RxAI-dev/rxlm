@@ -193,7 +193,7 @@ class MoeFeedForward(nn.Module):
             scatter_indices = token_indices.unsqueeze(1).expand(-1, embed_dim)
 
             # Allocate results in final tensor with scatter add
-            final_output.scatter_add_(0, scatter_indices, unpermuted_outputs)
+            final_output.scatter_add_(0, scatter_indices, unpermuted_outputs.to(dtype=final_output.dtype))
 
         # CHANGED: Add shared expert outputs (if any)
         # Shared experts are applied to all tokens without routing
