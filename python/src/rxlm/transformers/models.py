@@ -113,7 +113,8 @@ class ReactiveTransformerDecoder(ReactiveTransformerBase):
         head_params = list(self.head.parameters())
         if self.use_head_norm:
             head_params += list(self.head_norm.parameters())
-        return super().active_parameters() + stateless + head_params
+        embed_params = list(self.embedding.parameters())
+        return super().active_parameters() + stateless + head_params + embed_params
 
     def moe_router_loss(self):
         if self.use_moe:
