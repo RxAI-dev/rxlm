@@ -1,8 +1,8 @@
 import torch
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel
-import math
-from typing import Union
+import transformer_engine.pytorch as te
+from transformer_engine.common import recipe
 from sklearn.metrics import f1_score
 from ..training.base import BaseTrainer
 from .models import MLMTrainingModel
@@ -129,6 +129,7 @@ class AutoregressiveTrainer(BaseTrainer):
         self.moe_aux_loss_scale = moe_aux_loss_scale
         self.use_f1_metrics = use_f1_metrics
         self.is_sft = is_sft
+
 
     def compute_loss(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         inputs = batch['input_ids']
@@ -289,6 +290,9 @@ class IterativeAutoregressiveTrainer(AutoregressiveTrainer):
             moe_aux_loss_scale: float = 0.01,
             use_f1_metrics: bool = False,
             is_sft: bool = False,
+            use_te_fp8: bool = False,
+            fp8_history_len: int = 256,
+            collect_log_interval: int = 100,
             **kwargs
     ):
         super().__init__(
@@ -304,6 +308,19 @@ class IterativeAutoregressiveTrainer(AutoregressiveTrainer):
             **kwargs
         )
         self.collect_n_batches = collect_n_batches
+        self.use_te_fp8 = use_te_fp8
+        self.collect_log_interval = collect_log_interval
+        if use_te_fp8:
+            self.use_amp = False
+
+            self.fp8_recipe = recipe.DelayedScaling(
+                fp8_format=recipe.Format.HYBRID,
+                amax_history_len=fp8_history_len,
+                amax_compute_algo='max',
+                margin=0
+            )
+        else:
+            self.fp8_recipe = None
 
     def _run_epoch(
             self,
@@ -333,8 +350,12 @@ class IterativeAutoregressiveTrainer(AutoregressiveTrainer):
             # Collect phase: add batch to temporary list (tokenization happens here)
             collected_batches.append(batch)
 
+            if batch_idx % self.collect_log_interval == 0:
+                print(f'Collect & tokenize batch: {batch_idx} / {self.collect_n_batches}')
+
             # When we've collected N batches, run training loop
             if len(collected_batches) >= self.collect_n_batches:
+                print(f'Train on collected: {self.collect_n_batches} batches')
                 self._train_on_collected_batches(
                     collected_batches,
                     optimizer,
@@ -463,3 +484,31 @@ class IterativeAutoregressiveTrainer(AutoregressiveTrainer):
                 should_stop = callback.on_batch_end(self.model, self.epoch_steps, loss, batch)
                 if should_stop:
                     self.is_running = False
+
+    def train_step(self, batch: dict[str, torch.Tensor], _batch_idx: int) -> torch.Tensor:
+        if self.use_amp:
+            batch = {k: v.to(self.device) for k, v in batch.items()}
+            with torch.amp.autocast(device_type=self.device.type, dtype=self.dtype):
+                loss, _ = self.compute_loss(batch)
+        elif self.use_te_fp8 and self.fp8_recipe:
+            batch = {k: v.to(self.device) for k, v in batch.items()}
+            with te.fp8_autocast(enabled=True, fp8_recipe=self.fp8_recipe):
+                loss, _ = self.compute_loss(batch)
+        else:
+            batch = {k: v.to(self.device, dtype=self.dtype) for k, v in batch.items()}
+            loss, _ = self.compute_loss(batch)
+        return loss
+
+    def valid_step(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.use_amp:
+            batch = {k: v.to(self.device) for k, v in batch.items()}
+            with torch.amp.autocast(device_type=self.device.type, dtype=self.dtype):
+                loss, outputs = self.compute_loss(batch)
+        elif self.use_te_fp8 and self.fp8_recipe:
+            batch = {k: v.to(self.device) for k, v in batch.items()}
+            with te.fp8_autocast(enabled=True, fp8_recipe=self.fp8_recipe):
+                loss, outputs = self.compute_loss(batch)
+        else:
+            batch = {k: v.to(self.device, dtype=self.dtype) for k, v in batch.items()}
+            loss, outputs = self.compute_loss(batch)
+        return loss, outputs

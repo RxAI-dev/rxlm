@@ -4,7 +4,7 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
 name = "rxlm"
-version = "0.2.23"
+version = "0.2.24"
 description = "RxNN - RxLM: Reactive Language Models platform"
 
 authors = [
@@ -22,7 +22,7 @@ keywords = ["deep-learning", "ai", "machine-learning", "natural-language-process
 
 [project]
 name = "rxlm"
-version = "0.2.23"
+version = "0.2.24"
 description = "RxNN - RxLM: Reactive Language Models platform"
 
 license-files = [
@@ -33,7 +33,7 @@ license-files = [
 
 [tool.poetry.dependencies]
 python = ">=3.10"
-torch = "^2.6.0"
+torch = "^2.8.0"
 transformers = "^4.51.0"
 datasets = "^3.5.0"
 tokenizers = "^0.21.0"
@@ -41,3 +41,4 @@ huggingface-hub = "^0.30.0"
 tensorboard = "^2.19.0"
 nltk = "^3.9.1"
 scikit-learn = "^1.7.2"
+transformer-engine = '^2.8.0'

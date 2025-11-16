@@ -79,6 +79,8 @@ class DecoderOnlyTransformer(nn.Module, PyTorchModelHubMixin, pipeline_tag="text
             init_identity_norm: bool = False,
             tie_embeddings: bool = False,
             head_norm_type: str = 'layer_norm',
+            router_amp: bool = False,
+            router_dtype: torch.dtype = torch.float32,
             **kwargs
     ):
         super(DecoderOnlyTransformer, self).__init__(**kwargs)
@@ -132,6 +134,8 @@ class DecoderOnlyTransformer(nn.Module, PyTorchModelHubMixin, pipeline_tag="text
                     use_rms_norm=use_rms_norm,
                     self_attention=att_init(),
                     use_moe_att=use_moe_att,
+                    router_amp=router_amp,
+                    router_dtype=router_dtype,
                 )
 
 

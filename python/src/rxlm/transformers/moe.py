@@ -70,6 +70,8 @@ class MoeFeedForward(nn.Module):
             top_k: int = 1,
             dropout: float = 0.0,
             num_shared_experts: int = 0,  # CHANGED: Added shared experts parameter
+            router_amp: bool = False,
+            router_dtype: torch.dtype = torch.float32,
             *args,
             **kwargs
     ):
@@ -78,6 +80,8 @@ class MoeFeedForward(nn.Module):
         self.num_experts = num_experts
         self.top_k = top_k
         self.num_shared_experts = num_shared_experts  # CHANGED: Store number of shared experts
+        self.router_amp = router_amp
+        self.router_dtype = router_dtype
 
         self.router = MoeRouter(embed_dim, num_experts, top_k)
 
@@ -112,7 +116,11 @@ class MoeFeedForward(nn.Module):
         # Get routing weights and selected experts from router
         # routing_weights: [num_tokens, top_k]
         # selected_experts: [num_tokens, top_k]
-        routing_weights, selected_experts = self.router(x)
+        if self.router_amp:
+            with torch.amp.autocast(device_type=x.device.type, dtype=self.router_dtype):
+                routing_weights, selected_experts = self.router(x)
+        else:
+            routing_weights, selected_experts = self.router(x)
 
         # CHANGED: Fast path for single-token processing (autoregressive generation)
         # When processing one token at a time, avoid complex permutation overhead

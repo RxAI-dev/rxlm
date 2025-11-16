@@ -22,6 +22,8 @@ class ClassicTransformerLayer(nn.Module):
             num_shared_experts: int = 0,
             moe_top_k: int = 1,
             use_moe_att: bool = False,
+            router_amp: bool = False,
+            router_dtype: torch.dtype = torch.float32,
             *args,
             **kwargs,
     ):
@@ -32,13 +34,15 @@ class ClassicTransformerLayer(nn.Module):
         if use_gated:
             if use_moe:
                 self.ff = GatedMoeFeedForward(embed_dim, ff_dim, num_experts, ff_activation, top_k=moe_top_k,
-                                              dropout=ff_dropout, num_shared_experts=num_shared_experts)
+                                              dropout=ff_dropout, num_shared_experts=num_shared_experts,
+                                              router_amp=router_amp, router_dtype=router_dtype)
             else:
                 self.ff = GatedFeedForward(embed_dim, ff_dim, ff_activation, dropout=ff_dropout)
         else:
             if use_moe:
                 self.ff = MoeFeedForward(embed_dim, ff_dim, num_experts, ff_activation, top_k=moe_top_k,
-                                         dropout=ff_dropout, num_shared_experts=num_shared_experts)
+                                         dropout=ff_dropout, num_shared_experts=num_shared_experts,
+                                         router_amp=router_amp, router_dtype=router_dtype)
             else:
                 self.ff = FeedForward(embed_dim, ff_dim, ff_activation, dropout=ff_dropout)
 
