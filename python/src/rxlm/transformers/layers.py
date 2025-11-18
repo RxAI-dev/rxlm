@@ -26,7 +26,7 @@ class ReactiveTransformerLayer(nn.Module):
             use_moe_att: bool = False,
             skip_memory_cross_attention: bool = False,
             use_linear_self_attn: bool = False,
-            linear_attn_type: Literal['gla', 'deltanet', 'gated_deltanet'] = 'gla',
+            linear_attn_type: Literal['gla', 'deltanet', 'gated_deltanet', 'kda'] = 'gla',
             linear_attn_mode: str = 'chunk',
             linear_attn_expand_k: float = 0.5,
             linear_attn_expand_v: float = 1.0,

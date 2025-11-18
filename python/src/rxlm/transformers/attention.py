@@ -491,7 +491,7 @@ class LinearAttention(nn.Module):
         self,
         embed_dim: int,
         num_heads: int,
-        linear_attn_type: Literal['gla', 'deltanet', 'gated_deltanet'] = 'gla',
+        linear_attn_type: Literal['gla', 'deltanet', 'gated_deltanet', 'kda'] = 'gla',
         mode: str = 'chunk',
         expand_k: float = 0.5,
         expand_v: float = 1.0,
@@ -551,6 +551,22 @@ class LinearAttention(nn.Module):
                 use_short_conv=use_short_conv,
                 conv_size=conv_size,
                 use_gate=True,  # Always True for gated variant
+                norm_eps=norm_eps,
+                layer_idx=layer_idx,
+                **kwargs,
+            )
+        elif linear_attn_type == 'kda':
+            # Kimi Delta Attention - per-channel gating variant
+            from fla.layers import KimiDeltaAttention
+            head_dim = embed_dim // num_heads
+            self.attn_layer = KimiDeltaAttention(
+                hidden_size=embed_dim,
+                expand_v=expand_v,
+                head_dim=head_dim,
+                num_heads=num_heads,
+                mode=mode,
+                use_short_conv=use_short_conv,
+                conv_size=conv_size,
                 norm_eps=norm_eps,
                 layer_idx=layer_idx,
                 **kwargs,

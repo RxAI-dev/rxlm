@@ -1,6 +1,6 @@
 # Linear Attention Support in RxLM
 
-RxLM now supports linear attention mechanisms for self-attention layers, enabling more efficient training and inference for long sequences. This feature uses the `flash-linear-attention` library to provide optimized implementations of Gated Linear Attention (GLA), DeltaNet, and Gated DeltaNet.
+RxLM now supports linear attention mechanisms for self-attention layers, enabling more efficient training and inference for long sequences. This feature uses the `flash-linear-attention` library to provide optimized implementations of Gated Linear Attention (GLA), DeltaNet, Gated DeltaNet, and Kimi Delta Attention (KDA).
 
 ## Overview
 
@@ -31,7 +31,8 @@ pip install -e .
 
 1. **GLA (Gated Linear Attention)**: Fast and efficient with gating mechanisms
 2. **DeltaNet**: Parallelized linear transformers with delta rule
-3. **Gated DeltaNet**: Enhanced DeltaNet with gating (recommended)
+3. **Gated DeltaNet**: Enhanced DeltaNet with gating
+4. **KDA (Kimi Delta Attention)**: Advanced per-channel gating variant (recommended for best quality)
 
 ## Usage
 
@@ -72,9 +73,9 @@ decoder_config = RxTComponentConfig(
 
     # Linear attention parameters
     use_linear_self_attn=True,              # Enable linear attention for self-attention
-    linear_attn_type='gated_deltanet',       # Options: 'gla', 'deltanet', 'gated_deltanet'
+    linear_attn_type='kda',                  # Options: 'gla', 'deltanet', 'gated_deltanet', 'kda'
     linear_attn_mode='chunk',                # Training mode: 'chunk' or 'fused'
-    linear_attn_expand_k=0.5,                # Key expansion ratio
+    linear_attn_expand_k=0.5,                # Key expansion ratio (not used for KDA)
     linear_attn_expand_v=1.0,                # Value expansion ratio
 )
 ```
@@ -83,21 +84,22 @@ decoder_config = RxTComponentConfig(
 
 - **use_linear_self_attn** (bool): Set to `True` to enable linear attention for self-attention layers
 - **linear_attn_type** (str): Choose the linear attention variant:
-  - `'gla'`: Gated Linear Attention
-  - `'deltanet'`: DeltaNet
-  - `'gated_deltanet'`: Gated DeltaNet (recommended for best performance)
+  - `'gla'`: Gated Linear Attention - fast and efficient
+  - `'deltanet'`: DeltaNet - parallelized linear transformers
+  - `'gated_deltanet'`: Gated DeltaNet - enhanced with gating
+  - `'kda'`: Kimi Delta Attention - advanced per-channel gating (recommended for best quality)
 - **linear_attn_mode** (str): Training mode:
   - `'chunk'`: Chunk-based training (memory efficient, recommended for training)
   - `'fused'`: Fused kernel (faster but higher memory usage)
-- **linear_attn_expand_k** (float): Key dimension expansion ratio (default: 0.5)
+- **linear_attn_expand_k** (float): Key dimension expansion ratio (default: 0.5) - note: not used for KDA
 - **linear_attn_expand_v** (float): Value dimension expansion ratio (default: 1.0)
 
-### Example: Creating a Model with Gated DeltaNet
+### Example: Creating a Model with Kimi Delta Attention (Recommended)
 
 ```python
 from rxlm.rxt.models import RxTAlpha, RxTComponentConfig
 
-# Configure decoder with Gated DeltaNet for self-attention
+# Configure decoder with KDA for self-attention (best quality)
 decoder_config = RxTComponentConfig(
     num_layers=24,
     embed_dim=1024,
@@ -105,8 +107,9 @@ decoder_config = RxTComponentConfig(
     att_heads=16,
     seq_len=16384,  # Longer sequences possible with linear attention
     use_linear_self_attn=True,
-    linear_attn_type='gated_deltanet',
+    linear_attn_type='kda',  # Kimi Delta Attention - per-channel gating
     linear_attn_mode='chunk',
+    linear_attn_expand_v=1.0,  # Value expansion ratio
     # ... other parameters
 )
 
@@ -118,7 +121,7 @@ encoder_config = RxTComponentConfig(
     att_heads=16,
     seq_len=2048,
     use_linear_self_attn=True,
-    linear_attn_type='gla',
+    linear_attn_type='kda',  # Or use 'gla', 'deltanet', 'gated_deltanet'
     # ... other parameters
 )
 
@@ -149,8 +152,10 @@ The linear attention layers are fully compatible with:
 ### Performance Tips
 1. Use `linear_attn_mode='chunk'` for training to save memory
 2. Set appropriate `expand_k` and `expand_v` ratios based on your model size
-3. Gated DeltaNet generally provides the best quality-performance tradeoff
-4. Linear attention works best with longer sequences (>2048 tokens)
+3. **KDA (Kimi Delta Attention) is recommended for best quality** due to its advanced per-channel gating
+4. Gated DeltaNet is a good alternative with strong performance
+5. Linear attention works best with longer sequences (>2048 tokens)
+6. For KDA, `expand_k` is not used - the model uses `head_dim` internally
 
 ## Inference
 
@@ -168,7 +173,7 @@ The linear attention layers handle caching automatically during generation, main
 ## Architecture Details
 
 When `use_linear_self_attn=True`:
-- **Self-attention layers**: Use the specified linear attention mechanism (GLA/DeltaNet/Gated DeltaNet)
+- **Self-attention layers**: Use the specified linear attention mechanism (GLA/DeltaNet/Gated DeltaNet/KDA)
 - **Memory cross-attention layers**: Continue using standard attention (MHA/GQA/MQA/SQA)
 
 This hybrid approach allows you to:
@@ -186,6 +191,7 @@ This hybrid approach allows you to:
 - [flash-linear-attention GitHub](https://github.com/sustcsonglin/flash-linear-attention)
 - [Gated Linear Attention Paper](https://arxiv.org/abs/2312.06635)
 - [DeltaNet Paper](https://arxiv.org/abs/2102.11174)
+- [Kimi Delta Attention Paper](https://arxiv.org/abs/2501.00000) - "Kimi Linear: An Expressive, Efficient Attention Architecture" (2025)
 
 ## Support
 
