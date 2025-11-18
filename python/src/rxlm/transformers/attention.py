@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional
+from typing import Optional, Literal
 import math
 from .positional import RotaryPositionalEmbedding, RelativePositionalEmbedding
 
@@ -478,6 +478,144 @@ class SparseQueryAttention(MultiHeadAttention):
         else:
             # Compute attention using optimized PyTorch implementation
             return self._torch_attention(q.contiguous(), k.contiguous(), v.contiguous(), b, t, d, mask=mask, enable_gqa=is_gqa, generate_mode=generate_mode)
+
+
+class LinearAttention(nn.Module):
+    """
+    Wrapper for flash-linear-attention layers (GLA, DeltaNet, Gated DeltaNet).
+
+    This provides a compatible interface with MultiHeadAttention for use in RxLM.
+    """
+
+    def __init__(
+        self,
+        embed_dim: int,
+        num_heads: int,
+        linear_attn_type: Literal['gla', 'deltanet', 'gated_deltanet'] = 'gla',
+        mode: str = 'chunk',
+        expand_k: float = 0.5,
+        expand_v: float = 1.0,
+        use_short_conv: bool = False,
+        conv_size: int = 4,
+        use_gate: bool = True,
+        layer_idx: int = None,
+        norm_eps: float = 1e-5,
+        **kwargs,
+    ):
+        super(LinearAttention, self).__init__()
+
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.linear_attn_type = linear_attn_type
+
+        # Import the appropriate linear attention layer
+        if linear_attn_type == 'gla':
+            from fla.layers import GatedLinearAttention
+            self.attn_layer = GatedLinearAttention(
+                mode=mode,
+                hidden_size=embed_dim,
+                expand_k=expand_k,
+                expand_v=expand_v,
+                num_heads=num_heads,
+                use_short_conv=use_short_conv,
+                conv_size=conv_size,
+                use_output_gate=use_gate,
+                norm_eps=norm_eps,
+                layer_idx=layer_idx,
+                **kwargs,
+            )
+        elif linear_attn_type == 'deltanet':
+            from fla.layers import DeltaNet
+            self.attn_layer = DeltaNet(
+                mode=mode,
+                hidden_size=embed_dim,
+                expand_k=expand_k,
+                expand_v=expand_v,
+                num_heads=num_heads,
+                use_short_conv=use_short_conv,
+                conv_size=conv_size,
+                use_gate=use_gate,
+                norm_eps=norm_eps,
+                layer_idx=layer_idx,
+                **kwargs,
+            )
+        elif linear_attn_type == 'gated_deltanet':
+            # Gated DeltaNet is essentially DeltaNet with use_gate=True
+            from fla.layers import DeltaNet
+            self.attn_layer = DeltaNet(
+                mode=mode,
+                hidden_size=embed_dim,
+                expand_k=expand_k,
+                expand_v=expand_v,
+                num_heads=num_heads,
+                use_short_conv=use_short_conv,
+                conv_size=conv_size,
+                use_gate=True,  # Always True for gated variant
+                norm_eps=norm_eps,
+                layer_idx=layer_idx,
+                **kwargs,
+            )
+        else:
+            raise ValueError(f"Unknown linear_attn_type: {linear_attn_type}")
+
+        # For compatibility with existing code
+        self.rope = None
+        self.key_cache = None
+        self.value_cache = None
+        self.mask_cache = None
+
+    def reset_inner_cache(self):
+        """Reset cache for compatibility with MultiHeadAttention interface"""
+        self.key_cache = None
+        self.value_cache = None
+        self.mask_cache = None
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        mask: torch.Tensor = None,
+        stm_kv_cache: tuple[torch.Tensor, torch.Tensor] = None,
+        use_self_attn_cache: bool = False,
+        current_positions: torch.Tensor = None,
+    ):
+        """
+        Forward pass compatible with MultiHeadAttention interface.
+
+        For linear attention, query/key/value are expected to be the same (self-attention).
+        The linear attention layers expect input of shape (batch, seq_len, hidden_size).
+        """
+        # Linear attention layers expect single input tensor for self-attention
+        # In RxLM, for self-attention, query/key/value are all the same
+        hidden_states = query
+
+        # Prepare attention mask if provided
+        # flash-linear-attention expects mask of shape (batch, seq_len) or None
+        attention_mask = None
+        if mask is not None:
+            # Convert from (batch, 1, seq_len, seq_len) to (batch, seq_len)
+            if mask.dim() == 4:
+                # Take the diagonal or last row (for causal masks)
+                attention_mask = mask[:, 0, -1, :]
+            elif mask.dim() == 3:
+                attention_mask = mask[:, -1, :]
+            elif mask.dim() == 2:
+                attention_mask = mask
+
+        # Handle caching for inference
+        past_key_values = None
+        use_cache = use_self_attn_cache
+
+        # Call the linear attention layer
+        output, _, past_key_values = self.attn_layer(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+        )
+
+        return output
 
 
 def init_attention(
