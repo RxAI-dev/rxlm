@@ -91,7 +91,7 @@ class RxTComponentBase(nn.Module):
             stateless_layers_config: list[Literal['dense', 'moe']] = None,
             dense_layer_dim: int = 1536,
             use_linear_self_attn: bool = False,
-            linear_attn_type: Literal['gla', 'deltanet', 'gated_deltanet', 'kda'] = 'gla',
+            linear_attn_type: Literal['gla', 'deltanet', 'gated_deltanet', 'kda', 'md_gdn'] = 'gla',
             linear_attn_mode: str = 'chunk',
             linear_attn_expand_k: float = 0.5,
             linear_attn_expand_v: float = 1.0,

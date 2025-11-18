@@ -26,7 +26,7 @@ class ReactiveTransformerLayer(nn.Module):
             use_moe_att: bool = False,
             skip_memory_cross_attention: bool = False,
             use_linear_self_attn: bool = False,
-            linear_attn_type: Literal['gla', 'deltanet', 'gated_deltanet', 'kda'] = 'gla',
+            linear_attn_type: Literal['gla', 'deltanet', 'gated_deltanet', 'kda', 'md_gdn'] = 'gla',
             linear_attn_mode: str = 'chunk',
             linear_attn_expand_k: float = 0.5,
             linear_attn_expand_v: float = 1.0,
@@ -157,7 +157,14 @@ class ReactiveTransformerLayer(nn.Module):
         residual = x
         if not self.use_post_norm:
             x = self.norm1(x)
-        x = self.attention(x, x, x, mask=mask, use_self_attn_cache=use_self_attn_cache, current_positions=current_positions)
+
+        # Pass memory_state to attention if using linear attention with MD-GDN
+        if self.use_linear_self_attn:
+            x = self.attention(x, x, x, mask=mask, use_self_attn_cache=use_self_attn_cache,
+                             current_positions=current_positions, memory_state=stm)
+        else:
+            x = self.attention(x, x, x, mask=mask, use_self_attn_cache=use_self_attn_cache,
+                             current_positions=current_positions)
 
         x = residual + x
         if self.use_post_norm:

@@ -32,7 +32,8 @@ pip install -e .
 1. **GLA (Gated Linear Attention)**: Fast and efficient with gating mechanisms
 2. **DeltaNet**: Parallelized linear transformers with delta rule
 3. **Gated DeltaNet**: Enhanced DeltaNet with gating
-4. **KDA (Kimi Delta Attention)**: Advanced per-channel gating variant (recommended for best quality)
+4. **KDA (Kimi Delta Attention)**: Advanced per-channel gating variant
+5. **MD-GDN (Memory-Driven Gated DeltaNet)**: KDA extended with memory features (recommended for RxLM)
 
 ## Usage
 
@@ -87,7 +88,8 @@ decoder_config = RxTComponentConfig(
   - `'gla'`: Gated Linear Attention - fast and efficient
   - `'deltanet'`: DeltaNet - parallelized linear transformers
   - `'gated_deltanet'`: Gated DeltaNet - enhanced with gating
-  - `'kda'`: Kimi Delta Attention - advanced per-channel gating (recommended for best quality)
+  - `'kda'`: Kimi Delta Attention - advanced per-channel gating
+  - `'md_gdn'`: Memory-Driven Gated DeltaNet - KDA with memory features (recommended for RxLM)
 - **linear_attn_mode** (str): Training mode:
   - `'chunk'`: Chunk-based training (memory efficient, recommended for training)
   - `'fused'`: Fused kernel (faster but higher memory usage)
@@ -152,10 +154,12 @@ The linear attention layers are fully compatible with:
 ### Performance Tips
 1. Use `linear_attn_mode='chunk'` for training to save memory
 2. Set appropriate `expand_k` and `expand_v` ratios based on your model size
-3. **KDA (Kimi Delta Attention) is recommended for best quality** due to its advanced per-channel gating
-4. Gated DeltaNet is a good alternative with strong performance
-5. Linear attention works best with longer sequences (>2048 tokens)
-6. For KDA, `expand_k` is not used - the model uses `head_dim` internally
+3. **MD-GDN is recommended for RxLM** - it integrates memory features natively for better conversational coherence
+4. **KDA is recommended for standalone use** due to its advanced per-channel gating
+5. Gated DeltaNet is a good alternative with strong performance
+6. Linear attention works best with longer sequences (>2048 tokens)
+7. For KDA and MD-GDN, `expand_k` is not used - the model uses `head_dim` internally
+8. MD-GDN maintains continuous state across interactions, improving multi-turn conversations
 
 ## Inference
 
@@ -173,12 +177,13 @@ The linear attention layers handle caching automatically during generation, main
 ## Architecture Details
 
 When `use_linear_self_attn=True`:
-- **Self-attention layers**: Use the specified linear attention mechanism (GLA/DeltaNet/Gated DeltaNet/KDA)
+- **Self-attention layers**: Use the specified linear attention mechanism (GLA/DeltaNet/Gated DeltaNet/KDA/MD-GDN)
 - **Memory cross-attention layers**: Continue using standard attention (MHA/GQA/MQA/SQA)
 
 This hybrid approach allows you to:
 - Benefit from linear attention's efficiency for processing input sequences
 - Maintain precise attention over the RxLM memory state
+- (MD-GDN only) Integrate memory directly into self-attention for enhanced coherence
 
 ## Limitations
 
@@ -192,6 +197,7 @@ This hybrid approach allows you to:
 - [Gated Linear Attention Paper](https://arxiv.org/abs/2312.06635)
 - [DeltaNet Paper](https://arxiv.org/abs/2102.11174)
 - [Kimi Delta Attention Paper](https://arxiv.org/abs/2501.00000) - "Kimi Linear: An Expressive, Efficient Attention Architecture" (2025)
+- [Memory-Driven Gated DeltaNet (MD-GDN) Documentation](md_gdn.md) - Extended documentation for MD-GDN
 
 ## Support
 
