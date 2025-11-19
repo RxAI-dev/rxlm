@@ -4,7 +4,7 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
 name = "rxlm"
-version = "0.2.41"
+version = "0.2.44"
 description = "RxNN - RxLM: Reactive Language Models platform"
 
 authors = [
@@ -22,7 +22,7 @@ keywords = ["deep-learning", "ai", "machine-learning", "natural-language-process
 
 [project]
 name = "rxlm"
-version = "0.2.41"
+version = "0.2.44"
 description = "RxNN - RxLM: Reactive Language Models platform"
 
 license-files = [

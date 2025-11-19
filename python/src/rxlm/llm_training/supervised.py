@@ -1,8 +1,6 @@
 import torch
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel
-import transformer_engine.pytorch as te
-from transformer_engine.common import recipe
 from sklearn.metrics import f1_score
 from ..training.base import BaseTrainer
 from .models import MLMTrainingModel
@@ -314,6 +312,7 @@ class IterativeAutoregressiveTrainer(AutoregressiveTrainer):
         self.use_te_fp8 = use_te_fp8
         self.collect_log_interval = collect_log_interval
         if use_te_fp8:
+            from transformer_engine.common import recipe
             self.use_amp = False
 
             self.fp8_recipe = recipe.DelayedScaling(
@@ -385,7 +384,8 @@ class IterativeAutoregressiveTrainer(AutoregressiveTrainer):
                 scaler,
                 scheduler,
                 accumulated_tokens,
-                base_batch_idx
+                base_batch_idx,
+                batch_size,
             )
 
         # Validation at the end of epoch
@@ -498,6 +498,7 @@ class IterativeAutoregressiveTrainer(AutoregressiveTrainer):
             with torch.amp.autocast(device_type=self.device.type, dtype=self.dtype):
                 loss, _ = self.compute_loss(batch)
         elif self.use_te_fp8 and self.fp8_recipe:
+            import transformer_engine.pytorch as te
             batch = {k: v.to(self.device) for k, v in batch.items()}
             with te.fp8_autocast(enabled=True, fp8_recipe=self.fp8_recipe):
                 loss, _ = self.compute_loss(batch)
@@ -512,6 +513,7 @@ class IterativeAutoregressiveTrainer(AutoregressiveTrainer):
             with torch.amp.autocast(device_type=self.device.type, dtype=self.dtype):
                 loss, outputs = self.compute_loss(batch)
         elif self.use_te_fp8 and self.fp8_recipe:
+            import transformer_engine.pytorch as te
             batch = {k: v.to(self.device) for k, v in batch.items()}
             with te.fp8_autocast(enabled=True, fp8_recipe=self.fp8_recipe):
                 loss, outputs = self.compute_loss(batch)
