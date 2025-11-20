@@ -4,6 +4,7 @@ from typing import TypedDict, Optional, Iterator, Union, Literal
 from huggingface_hub import PyTorchModelHubMixin
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
+from ..training.tokenizer import decode_post_process
 from ..transformers.positional import RotaryPositionalEmbedding
 from ..transformers.attention import init_attention
 from ..transformers.llm_layers import ClassicTransformerLayer
@@ -229,6 +230,9 @@ class DecoderOnlyTransformer(nn.Module, PyTorchModelHubMixin, pipeline_tag="text
                 yield next_token
                 if next_token == eos_token_id:
                     break
+
+    def stringify_token(self, tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast], token_id: int, skip_special_tokens: bool = True) -> str:
+        return decode_post_process(tokenizer.decode([token_id], skip_special_tokens=skip_special_tokens))
 
     def _build_full_conversation_text(self, chat_history: list[list[str]], new_query: str, tokenizer_config: dict) -> str:
         full_text = f"{tokenizer_config['bos_token']}"
