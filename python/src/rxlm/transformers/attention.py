@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Literal
+from typing import Optional, Literal, Union
 import math
 from .positional import RotaryPositionalEmbedding, RelativePositionalEmbedding
 
@@ -688,65 +688,89 @@ def init_attention(
         is_causal: bool = False,
         use_bias: bool = False,
         num_query_groups: int = 1,
-) -> MultiHeadAttention:
-    assert attention_type in ['mha', 'gqa', 'mqa', 'sqa'], "Error, attention type should be one of: 'mha', 'gqa', 'mqa' or 'sqa'"
+        is_linear_attention: bool = False,
+        linear_attn_mode: str = 'chunk',
+        linear_attn_expand_k: float = None,
+        linear_attn_expand_v: float = None,
+        linear_attn_use_short_conv: bool = False,
+        linear_attn_conv_size: int = 4,
+        linear_attn_use_gate: bool = True,
+        linear_attn_layer_idx: int = None,
+        linear_attn_norm_eps: float = 1e-5,
+) -> Union[MultiHeadAttention, LinearAttention]:
+    if not is_linear_attention:
+        assert attention_type in ['mha', 'gqa', 'mqa', 'sqa'], "Error, attention type should be one of: 'mha', 'gqa', 'mqa' or 'sqa'"
 
-    if attention_type == 'sqa':
-        return SparseQueryAttention(
-            embed_dim,
-            num_heads,
-            gqa_groups,
-            num_query_groups,
-            dropout=dropout,
-            rope=rope,
-            use_relative_embeddings=use_relative_embeddings,
-            max_seq_len=max_seq_len,
-            rope_only_for_query=rope_only_for_query,
-            rope_only_for_keys=rope_only_for_keys,
-            use_flash_attention=use_flash_attention,
-            is_causal=is_causal,
-            use_bias=use_bias,
-        )
-    elif attention_type == "gqa":
-        return GroupedQueryAttention(
-            embed_dim,
-            num_heads,
-            gqa_groups,
-            dropout=dropout,
-            rope=rope,
-            use_relative_embeddings=use_relative_embeddings,
-            max_seq_len=max_seq_len,
-            rope_only_for_query=rope_only_for_query,
-            rope_only_for_keys=rope_only_for_keys,
-            use_flash_attention=use_flash_attention,
-            is_causal=is_causal,
-            use_bias=use_bias,
-        )
-    elif attention_type == "mqa":
-        return MultiQueryAttention(
-            embed_dim,
-            num_heads,
-            dropout=dropout,
-            rope=rope,
-            use_relative_embeddings=use_relative_embeddings,
-            max_seq_len=max_seq_len,
-            rope_only_for_query=rope_only_for_query,
-            rope_only_for_keys=rope_only_for_keys,
-            use_flash_attention=use_flash_attention,
-            is_causal=is_causal,
-            use_bias=use_bias,
-        )
+        if attention_type == 'sqa':
+            return SparseQueryAttention(
+                embed_dim,
+                num_heads,
+                gqa_groups,
+                num_query_groups,
+                dropout=dropout,
+                rope=rope,
+                use_relative_embeddings=use_relative_embeddings,
+                max_seq_len=max_seq_len,
+                rope_only_for_query=rope_only_for_query,
+                rope_only_for_keys=rope_only_for_keys,
+                use_flash_attention=use_flash_attention,
+                is_causal=is_causal,
+                use_bias=use_bias,
+            )
+        elif attention_type == "gqa":
+            return GroupedQueryAttention(
+                embed_dim,
+                num_heads,
+                gqa_groups,
+                dropout=dropout,
+                rope=rope,
+                use_relative_embeddings=use_relative_embeddings,
+                max_seq_len=max_seq_len,
+                rope_only_for_query=rope_only_for_query,
+                rope_only_for_keys=rope_only_for_keys,
+                use_flash_attention=use_flash_attention,
+                is_causal=is_causal,
+                use_bias=use_bias,
+            )
+        elif attention_type == "mqa":
+            return MultiQueryAttention(
+                embed_dim,
+                num_heads,
+                dropout=dropout,
+                rope=rope,
+                use_relative_embeddings=use_relative_embeddings,
+                max_seq_len=max_seq_len,
+                rope_only_for_query=rope_only_for_query,
+                rope_only_for_keys=rope_only_for_keys,
+                use_flash_attention=use_flash_attention,
+                is_causal=is_causal,
+                use_bias=use_bias,
+            )
+        else:
+            return MultiHeadAttention(
+                embed_dim,
+                num_heads,
+                dropout=dropout,
+                rope=rope,
+                use_relative_embeddings=use_relative_embeddings,
+                max_seq_len=max_seq_len,
+                rope_only_for_query=rope_only_for_query,
+                rope_only_for_keys=rope_only_for_keys,
+                use_flash_attention=use_flash_attention,
+                is_causal=is_causal,
+                use_bias=use_bias,
+            )
     else:
-        return MultiHeadAttention(
+        return LinearAttention(
             embed_dim,
             num_heads,
-            dropout=dropout,
-            rope=rope,
-            use_relative_embeddings=use_relative_embeddings,
-            max_seq_len=max_seq_len,
-            rope_only_for_query=rope_only_for_query,
-            rope_only_for_keys=rope_only_for_keys,
-            use_flash_attention=use_flash_attention,
-            is_causal=is_causal,
-            use_bias=use_bias,
+            attention_type=attention_type,
+            mode=linear_attn_mode,
+            expand_k=linear_attn_expand_k,
+            expand_v=linear_attn_expand_v,
+            use_short_conv=linear_attn_use_short_conv,
+            conv_size=linear_attn_conv_size,
+            use_gate=linear_attn_use_gate,
+            layer_idx=linear_attn_layer_idx,
+            norm_eps=linear_attn_norm_eps,
         )

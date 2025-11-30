@@ -78,10 +78,8 @@ class RxTComponentBase(nn.Module):
             use_moe: bool = False,
             num_experts: int = 1,
             moe_top_k: int = 1,
-            self_att_type: str = 'gqa',
-            cross_att_type: str = 'mqa',
-            att_experts: int = None,
-            att_query_experts: int = None,
+            self_att_type: str = 'sqa',
+            cross_att_type: str = 'sqa',
             att_query_groups: int = None,
             cross_att_groups: int = None,
             cross_att_query_groups: int = None,
@@ -90,61 +88,65 @@ class RxTComponentBase(nn.Module):
             skip_memory_cross_attention: bool = False,
             stateless_layers_config: list[Literal['dense', 'moe']] = None,
             dense_layer_dim: int = 1536,
-            use_linear_self_attn: bool = False,
-            linear_attn_type: Literal['gla', 'deltanet', 'gated_deltanet', 'kda', 'md_gdn'] = 'gla',
+            attn_layer_types: list[str] = None,
+            stateless_attn_layer_types: list[str] = None,
             linear_attn_mode: str = 'chunk',
             linear_attn_expand_k: float = 0.5,
             linear_attn_expand_v: float = 1.0,
+            linear_attn_use_short_conv: bool = False,
+            linear_attn_conv_size: int = 4,
+            linear_attn_use_gate: bool = True,
+            linear_attn_norm_eps: float = 1e-5,
+            use_nope: bool = False,
             **kwargs
     ):
         super(RxTComponentBase, self).__init__(**kwargs)
         assert ff_activation in ['relu', 'gelu',
                                  'swish', 'silu', 'linear',
                                  'sigmoid'], 'Feed-forward activation could be "relu", "gelu", "swish", "silu", "linear", "sigmoid".'
-        assert self_att_type in ['mha', 'gqa', 'mqa', 'gma', 'dma',
-                                 'sqa'], 'Self-attention type could be "mha", "gqa", "mqa", "gma", "dma", "sqa".'
-        assert cross_att_type in ['mha', 'gqa', 'mqa', 'gma', 'dma',
-                                  'sqa'], 'Memory cross-attention type could be "mha", "gqa", "mqa", "gma", "dma", "sqa".'
+        assert self_att_type in ['mha', 'gqa', 'mqa',
+                                 'sqa', 'hybrid'], 'Self-attention type could be "mha", "gqa", "mqa", "sqa" or "hybrid".'
+        assert cross_att_type in ['mha', 'gqa', 'mqa', 'sqa'], 'Memory cross-attention type could be "mha", "gqa", "mqa", "sqa".'
+
+        if self_att_type == 'hybrid':
+            assert len(attn_layer_types) == num_layers
+            for layer_type in attn_layer_types:
+                assert layer_type in ['mha', 'gqa', 'mqa', 'gma', 'dma', 'sqa', 'gla', 'deltanet', 'gated_deltanet', 'kda', 'md_gdn'], 'Self-attention has incorrect type.'
+
+            if stateless_layers_config is not None:
+                assert len(stateless_attn_layer_types) == len(stateless_layers_config)
+                for layer_type in stateless_attn_layer_types:
+                    assert layer_type in ['mha', 'gqa', 'mqa', 'gma', 'dma', 'sqa', 'gla', 'deltanet', 'gated_deltanet', 'kda', 'md_gdn'], 'Stateless layers self-attention has incorrect type.'
 
         embedding = nn.Embedding(vocab_size, embed_dim)
-        rope = RotaryPositionalEmbedding(embed_dim // att_heads, seq_len)
+        rope = RotaryPositionalEmbedding(embed_dim // att_heads, seq_len) if not self.use_nope else None
         stm = ShortTermMemory(num_layers, embed_dim, stm_size)
 
         ff_activation = get_activation_layer(ff_activation)
 
-        if self_att_type in ['mha', 'gqa', 'mqa', 'sqa']:
-            att_init = lambda: init_attention(embed_dim, att_heads, self_att_type, att_groups, rope=rope,
-                                              use_flash_attention=use_flash_attention, dropout=att_dropout,
-                                              max_seq_len=seq_len, is_causal=is_causal, num_query_groups=att_query_groups,
-                                              )
-        else:
-            att_init = lambda: init_experimental_attention(embed_dim, att_heads, self_att_type, att_groups, rope=rope,
-                                                           use_flash_attention=use_flash_attention, dropout=att_dropout,
-                                                           max_seq_len=seq_len, is_causal=is_causal,
-                                                           num_experts=att_experts,
-                                                           num_query_experts=att_query_experts,
-                                                           num_query_groups=att_query_groups)
 
+        att_init = lambda attn_type, layer_idx: init_attention(
+            embed_dim, att_heads, attn_type, att_groups, rope=rope,
+            use_flash_attention=use_flash_attention, dropout=att_dropout,
+            max_seq_len=seq_len, is_causal=is_causal, num_query_groups=att_query_groups,
+            is_linear_attention=attn_type not in ['mha', 'gqa', 'mqa', 'sqa'],
+            linear_attn_mode=linear_attn_mode, linear_attn_expand_k=linear_attn_expand_k,
+            linear_attn_expand_v=linear_attn_expand_v, linear_attn_use_short_conv=linear_attn_use_short_conv,
+            linear_attn_conv_size=linear_attn_conv_size, linear_attn_use_gate=linear_attn_use_gate,
+            linear_attn_norm_eps=linear_attn_norm_eps, linear_attn_layer_idx=layer_idx
+        )
 
         if not skip_memory_cross_attention:
-            if cross_att_type in ['mha', 'gqa', 'mqa', 'sqa']:
-                cross_att_init = lambda: init_attention(embed_dim, att_heads, cross_att_type, att_groups, rope=rope,
+            cross_att_init = lambda: init_attention(embed_dim, att_heads, cross_att_type, cross_att_groups or att_groups, rope=rope,
                                                         use_flash_attention=use_flash_attention, dropout=att_dropout,
                                                         max_seq_len=seq_len, is_causal=False, rope_only_for_query=True,
                                                         num_query_groups=cross_att_query_groups or att_query_groups)
-            else:
-                cross_att_init = lambda: init_experimental_attention(embed_dim, att_heads, cross_att_type,
-                                                                     cross_att_groups or att_groups, rope=rope,
-                                                                     use_flash_attention=use_flash_attention,
-                                                                     dropout=att_dropout,
-                                                                     max_seq_len=seq_len, is_causal=False,
-                                                                     num_experts=att_experts,
-                                                                     num_query_experts=att_query_experts,
-                                                                     num_query_groups=cross_att_query_groups or att_query_groups,
-                                                                     rope_only_for_query=True)
+
 
             if stateless_layers_config is not None:
-                def stateless_layer_init(layer_type: Literal['dense', 'moe']):
+                def stateless_layer_init(layer_type: Literal['dense', 'moe'], layer_idx: int):
+                    attn_type = stateless_attn_layer_types[layer_idx] if self_att_type == 'hybrid' else self_att_type
+
                     if layer_type == 'dense':
                         return ClassicTransformerLayer(
                             embed_dim,
@@ -154,7 +156,7 @@ class RxTComponentBase(nn.Module):
                             ff_activation=ff_activation,
                             ff_dropout=ff_dropout,
                             use_rms_norm=use_rms_norm,
-                            self_attention=att_init(),
+                            self_attention=att_init(attn_type, layer_idx),
                         )
                     else:
                         return ClassicTransformerLayer(
@@ -167,14 +169,18 @@ class RxTComponentBase(nn.Module):
                             ff_activation=ff_activation,
                             ff_dropout=ff_dropout,
                             use_rms_norm=use_rms_norm,
-                            self_attention=att_init(),
+                            self_attention=att_init(attn_type, layer_idx),
                         )
 
                 stateless_layers = nn.ModuleList([
-                    stateless_layer_init(layer_type) for layer_type in stateless_layers_config
+                    stateless_layer_init(layer_type, layer_idx) for layer_idx, layer_type in enumerate(stateless_layers_config)
                 ])
             else:
                 stateless_layers = None
+
+            num_stateless_layers = len(stateless_layers_config) if stateless_layers_config is not None else 0
+            get_attn_type = lambda idx: attn_layer_types[idx] if self_att_type == 'hybrid' else self_att_type
+            get_layer_idx = lambda idx: num_stateless_layers + idx
 
             layers = nn.ModuleList([
                 ReactiveTransformerLayer(
@@ -187,14 +193,8 @@ class RxTComponentBase(nn.Module):
                     ff_activation=ff_activation,
                     ff_dropout=ff_dropout,
                     use_rms_norm=use_rms_norm,
-                    self_attention=att_init(),
+                    self_attention=att_init(get_attn_type(i), get_layer_idx(i)),
                     memory_cross_attention=cross_att_init(),
-                    use_linear_self_attn=use_linear_self_attn,
-                    linear_attn_type=linear_attn_type,
-                    linear_attn_mode=linear_attn_mode,
-                    linear_attn_expand_k=linear_attn_expand_k,
-                    linear_attn_expand_v=linear_attn_expand_v,
-                    linear_attn_layer_idx=i,
                 ) for i in range(num_layers)
             ])
         else:
@@ -209,15 +209,9 @@ class RxTComponentBase(nn.Module):
                     ff_activation=ff_activation,
                     ff_dropout=ff_dropout,
                     use_rms_norm=use_rms_norm,
-                    self_attention=att_init(),
+                    self_attention=att_init(self_att_type, i),
                     memory_cross_attention=None,
                     skip_memory_cross_attention=skip_memory_cross_attention,
-                    use_linear_self_attn=use_linear_self_attn,
-                    linear_attn_type=linear_attn_type,
-                    linear_attn_mode=linear_attn_mode,
-                    linear_attn_expand_k=linear_attn_expand_k,
-                    linear_attn_expand_v=linear_attn_expand_v,
-                    linear_attn_layer_idx=i,
                 ) for i in range(num_layers)
             ])
             stateless_layers = None

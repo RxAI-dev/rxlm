@@ -25,33 +25,12 @@ class ReactiveTransformerLayer(nn.Module):
             moe_top_k: int = 1,
             use_moe_att: bool = False,
             skip_memory_cross_attention: bool = False,
-            use_linear_self_attn: bool = False,
-            linear_attn_type: Literal['gla', 'deltanet', 'gated_deltanet', 'kda', 'md_gdn'] = 'gla',
-            linear_attn_mode: str = 'chunk',
-            linear_attn_expand_k: float = 0.5,
-            linear_attn_expand_v: float = 1.0,
-            linear_attn_layer_idx: Optional[int] = None,
             *args,
             **kwargs,
     ):
         super(ReactiveTransformerLayer, self).__init__(*args, **kwargs)
 
-        # Initialize self-attention: use linear attention if requested, otherwise use standard attention
-        self.use_linear_self_attn = use_linear_self_attn
-        if use_linear_self_attn:
-            # Get num_heads from the self_attention parameter to ensure consistency
-            num_heads = self_attention.num_heads if hasattr(self_attention, 'num_heads') else 8
-            self.attention = LinearAttention(
-                embed_dim=embed_dim,
-                num_heads=num_heads,
-                linear_attn_type=linear_attn_type,
-                mode=linear_attn_mode,
-                expand_k=linear_attn_expand_k,
-                expand_v=linear_attn_expand_v,
-                layer_idx=linear_attn_layer_idx,
-            )
-        else:
-            self.attention = self_attention
+        self.attention = self_attention
 
         self.skip_memory_cross_attention = skip_memory_cross_attention
         self.memory_cross_attention = memory_cross_attention
@@ -127,7 +106,7 @@ class ReactiveTransformerLayer(nn.Module):
 
     def update_max_len(self, max_seq_len: int):
         # Only update rope for standard attention (linear attention doesn't use rope)
-        if not self.use_linear_self_attn and self.attention.rope is not None:
+        if self.attention.rope is not None:
             self.attention.rope.update_max_len(max_seq_len)
         # if self.memory_cross_attention.rope is not None:
         #     self.memory_cross_attention.rope.update_max_len(max_seq_len)
@@ -157,13 +136,7 @@ class ReactiveTransformerLayer(nn.Module):
         residual = x
         if not self.use_post_norm:
             x = self.norm1(x)
-
-        # Pass memory_state to attention if using linear attention with MD-GDN
-        if self.use_linear_self_attn:
-            x = self.attention(x, x, x, mask=mask, use_self_attn_cache=use_self_attn_cache,
-                             current_positions=current_positions, memory_state=stm)
-        else:
-            x = self.attention(x, x, x, mask=mask, use_self_attn_cache=use_self_attn_cache,
+        x = self.attention(x, x, x, mask=mask, use_self_attn_cache=use_self_attn_cache,
                              current_positions=current_positions)
 
         x = residual + x
