@@ -48,6 +48,11 @@ class RxTComponentConfig(TypedDict):
     cross_att_query_groups: int
     use_head_norm: bool
     init_identity_norm: bool
+    use_linear_self_attn: bool
+    linear_attn_type: str
+    linear_attn_mode: str
+    linear_attn_expand_k: float
+    linear_attn_expand_v: float
 
 
 class RxTComponentBase(nn.Module):
@@ -85,6 +90,11 @@ class RxTComponentBase(nn.Module):
             skip_memory_cross_attention: bool = False,
             stateless_layers_config: list[Literal['dense', 'moe']] = None,
             dense_layer_dim: int = 1536,
+            use_linear_self_attn: bool = False,
+            linear_attn_type: Literal['gla', 'deltanet', 'gated_deltanet', 'kda', 'md_gdn'] = 'gla',
+            linear_attn_mode: str = 'chunk',
+            linear_attn_expand_k: float = 0.5,
+            linear_attn_expand_v: float = 1.0,
             **kwargs
     ):
         super(RxTComponentBase, self).__init__(**kwargs)
@@ -179,7 +189,13 @@ class RxTComponentBase(nn.Module):
                     use_rms_norm=use_rms_norm,
                     self_attention=att_init(),
                     memory_cross_attention=cross_att_init(),
-                ) for _ in range(num_layers)
+                    use_linear_self_attn=use_linear_self_attn,
+                    linear_attn_type=linear_attn_type,
+                    linear_attn_mode=linear_attn_mode,
+                    linear_attn_expand_k=linear_attn_expand_k,
+                    linear_attn_expand_v=linear_attn_expand_v,
+                    linear_attn_layer_idx=i,
+                ) for i in range(num_layers)
             ])
         else:
             layers = nn.ModuleList([
@@ -196,7 +212,13 @@ class RxTComponentBase(nn.Module):
                     self_attention=att_init(),
                     memory_cross_attention=None,
                     skip_memory_cross_attention=skip_memory_cross_attention,
-                ) for _ in range(num_layers)
+                    use_linear_self_attn=use_linear_self_attn,
+                    linear_attn_type=linear_attn_type,
+                    linear_attn_mode=linear_attn_mode,
+                    linear_attn_expand_k=linear_attn_expand_k,
+                    linear_attn_expand_v=linear_attn_expand_v,
+                    linear_attn_layer_idx=i,
+                ) for i in range(num_layers)
             ])
             stateless_layers = None
 
