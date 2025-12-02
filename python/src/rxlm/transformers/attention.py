@@ -764,7 +764,7 @@ def init_attention(
         return LinearAttention(
             embed_dim,
             num_heads,
-            attention_type=attention_type,
+            linear_attn_type=attention_type,
             mode=linear_attn_mode,
             expand_k=linear_attn_expand_k,
             expand_v=linear_attn_expand_v,

@@ -97,6 +97,7 @@ class RxTComponentBase(nn.Module):
             linear_attn_conv_size: int = 4,
             linear_attn_use_gate: bool = True,
             linear_attn_norm_eps: float = 1e-5,
+            linear_attn_heads: int = None,
             use_nope: bool = False,
             **kwargs
     ):
@@ -119,14 +120,15 @@ class RxTComponentBase(nn.Module):
                     assert layer_type in ['mha', 'gqa', 'mqa', 'gma', 'dma', 'sqa', 'gla', 'deltanet', 'gated_deltanet', 'kda', 'md_gdn'], 'Stateless layers self-attention has incorrect type.'
 
         embedding = nn.Embedding(vocab_size, embed_dim)
-        rope = RotaryPositionalEmbedding(embed_dim // att_heads, seq_len) if not self.use_nope else None
+        rope = RotaryPositionalEmbedding(embed_dim // att_heads, seq_len) if not use_nope else None
         stm = ShortTermMemory(num_layers, embed_dim, stm_size)
 
         ff_activation = get_activation_layer(ff_activation)
 
+        linear_attn_heads = linear_attn_heads or att_heads
 
         att_init = lambda attn_type, layer_idx: init_attention(
-            embed_dim, att_heads, attn_type, att_groups, rope=rope,
+            embed_dim, att_heads if attn_type in ['mha', 'gqa', 'mqa', 'sqa'] else linear_attn_heads, attn_type, att_groups, rope=rope,
             use_flash_attention=use_flash_attention, dropout=att_dropout,
             max_seq_len=seq_len, is_causal=is_causal, num_query_groups=att_query_groups,
             is_linear_attention=attn_type not in ['mha', 'gqa', 'mqa', 'sqa'],
