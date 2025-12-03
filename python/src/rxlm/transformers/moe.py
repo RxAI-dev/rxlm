@@ -538,25 +538,52 @@ class VectorizedMoeFeedForward(nn.Module):
     def _single_token_expert_forward(
         self,
         x: torch.Tensor,
-        expert_idx: int
+        selected_experts: torch.Tensor,
+        routing_weights: torch.Tensor
     ) -> torch.Tensor:
         """
-        Forward pass for a single token through one expert.
+        Vectorized forward pass for a single token through top-k experts.
 
         Args:
             x: [1, embed_dim] - single token input
-            expert_idx: index of the expert to use
+            selected_experts: [top_k] - indices of selected experts
+            routing_weights: [top_k] - routing weights for each expert
 
         Returns:
-            output: [embed_dim] - expert output
+            output: [1, embed_dim] - weighted sum of expert outputs
         """
-        token_input = x.unsqueeze(0)  # [1, embed_dim]
-        hidden = torch.matmul(token_input, self.w1[expert_idx]) + self.b1[expert_idx]
+        # Select weights and biases for active experts using advanced indexing
+        # [num_experts, embed_dim, hidden_dim] -> [top_k, embed_dim, hidden_dim]
+        w1_selected = self.w1[selected_experts]  # [top_k, embed_dim, hidden_dim]
+        b1_selected = self.b1[selected_experts]  # [top_k, hidden_dim]
+        w2_selected = self.w2[selected_experts]  # [top_k, hidden_dim, embed_dim]
+        b2_selected = self.b2[selected_experts]  # [top_k, embed_dim]
+
+        # Expand single token for batched computation: [1, embed_dim] -> [top_k, 1, embed_dim]
+        x_expanded = x.unsqueeze(0).expand(self.top_k, -1, -1)  # [top_k, 1, embed_dim]
+
+        # First linear layer: [top_k, 1, D] @ [top_k, D, H] -> [top_k, 1, H]
+        hidden = torch.bmm(x_expanded, w1_selected)  # [top_k, 1, hidden_dim]
+        hidden = hidden + b1_selected.unsqueeze(1)  # Add bias
+
+        # Activation
         hidden = self.activation(hidden)
+
+        # Dropout
         if self.dropout is not None:
             hidden = self.dropout(hidden)
-        expert_out = torch.matmul(hidden, self.w2[expert_idx]) + self.b2[expert_idx]
-        return expert_out.squeeze(0)
+
+        # Second linear layer: [top_k, 1, H] @ [top_k, H, D] -> [top_k, 1, D]
+        expert_outputs = torch.bmm(hidden, w2_selected)  # [top_k, 1, embed_dim]
+        expert_outputs = expert_outputs + b2_selected.unsqueeze(1)  # Add bias
+
+        # Apply routing weights: [top_k, 1, embed_dim] * [top_k, 1, 1] -> [top_k, 1, embed_dim]
+        weighted_outputs = expert_outputs * routing_weights.view(-1, 1, 1)
+
+        # Sum across experts: [top_k, 1, embed_dim] -> [1, embed_dim]
+        final_output = weighted_outputs.sum(dim=0)
+
+        return final_output
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Store original shape for final step
@@ -574,13 +601,10 @@ class VectorizedMoeFeedForward(nn.Module):
 
         # Fast path for single-token processing (autoregressive generation)
         if num_tokens == 1:
-            # Simple loop over top-k experts for single token - overhead is negligible
-            final_output = torch.zeros_like(x)
-            for k in range(self.top_k):
-                expert_idx = selected_experts[0, k]
-                weight = routing_weights[0, k]
-                expert_out = self._single_token_expert_forward(x, expert_idx)
-                final_output += weight * expert_out
+            # Vectorized computation for all top-k experts - no Python loop!
+            final_output = self._single_token_expert_forward(
+                x, selected_experts[0], routing_weights[0]
+            )
         else:
             # === STEP 2: CREATE DISPOSE MAP ===
             flat_selected_experts = selected_experts.view(-1)
@@ -718,24 +742,52 @@ class VectorizedGatedMoeFeedForward(VectorizedMoeFeedForward):
     def _single_token_expert_forward(
         self,
         x: torch.Tensor,
-        expert_idx: int
+        selected_experts: torch.Tensor,
+        routing_weights: torch.Tensor
     ) -> torch.Tensor:
         """
-        Forward pass for a single token through one gated expert.
+        Vectorized forward pass for a single token through top-k gated experts.
 
         Args:
             x: [1, embed_dim] - single token input
-            expert_idx: index of the expert to use
+            selected_experts: [top_k] - indices of selected experts
+            routing_weights: [top_k] - routing weights for each expert
 
         Returns:
-            output: [embed_dim] - expert output
+            output: [1, embed_dim] - weighted sum of expert outputs
         """
-        token_input = x.unsqueeze(0)  # [1, embed_dim]
-        gated_hidden = torch.matmul(token_input, self.w1[expert_idx]) + self.b1[expert_idx]
-        l, g = gated_hidden.chunk(2, dim=-1)
+        # Select weights and biases for active experts using advanced indexing
+        w1_selected = self.w1[selected_experts]  # [top_k, embed_dim, hidden_dim * 2]
+        b1_selected = self.b1[selected_experts]  # [top_k, hidden_dim * 2]
+        w2_selected = self.w2[selected_experts]  # [top_k, hidden_dim, embed_dim]
+        b2_selected = self.b2[selected_experts]  # [top_k, embed_dim]
+
+        # Expand single token for batched computation: [1, embed_dim] -> [top_k, 1, embed_dim]
+        x_expanded = x.unsqueeze(0).expand(self.top_k, -1, -1)  # [top_k, 1, embed_dim]
+
+        # First linear layer (GatedLinearUnit): [top_k, 1, D] @ [top_k, D, 2H] -> [top_k, 1, 2H]
+        gated_hidden = torch.bmm(x_expanded, w1_selected)  # [top_k, 1, hidden_dim * 2]
+        gated_hidden = gated_hidden + b1_selected.unsqueeze(1)  # Add bias
+
+        # Split into linear and gate components
+        l, g = gated_hidden.chunk(2, dim=-1)  # Each: [top_k, 1, hidden_dim]
+
+        # Apply gating: l * activation(g)
         hidden = l * self.activation(g)
+
+        # Dropout
         if self.dropout is not None:
             hidden = self.dropout(hidden)
-        expert_out = torch.matmul(hidden, self.w2[expert_idx]) + self.b2[expert_idx]
-        return expert_out.squeeze(0)
+
+        # Second linear layer: [top_k, 1, H] @ [top_k, H, D] -> [top_k, 1, D]
+        expert_outputs = torch.bmm(hidden, w2_selected)  # [top_k, 1, embed_dim]
+        expert_outputs = expert_outputs + b2_selected.unsqueeze(1)  # Add bias
+
+        # Apply routing weights: [top_k, 1, embed_dim] * [top_k, 1, 1] -> [top_k, 1, embed_dim]
+        weighted_outputs = expert_outputs * routing_weights.view(-1, 1, 1)
+
+        # Sum across experts: [top_k, 1, embed_dim] -> [1, embed_dim]
+        final_output = weighted_outputs.sum(dim=0)
+
+        return final_output
 
