@@ -19,40 +19,54 @@ from ..memory.gate import ResidualGate, ResidualGateType, SlotStatusType
 from ..utils import get_model_size
 from ..experimental.attention import init_experimental_attention
 from ..training.tokenizer import decode_post_process
+from ..training.utils import RxTModelProfiler
 
 
 class RxTComponentConfig(TypedDict):
-    num_layers: int
-    vocab_size: int
-    embed_dim: int
-    ff_dim: int
-    att_heads: int
-    seq_len: int
-    stm_size: int
-    use_flash_attention: bool
-    use_gated: bool
-    ff_activation: str
-    ff_dropout: float
-    att_dropout: float
-    use_rms_norm: bool
-    att_groups: int
-    use_moe: bool
-    num_experts: int
-    moe_top_k: int
-    self_att_type: str
-    cross_att_type: str
-    att_experts: int
-    att_query_experts: int
-    att_query_groups: int
-    cross_att_groups: int
-    cross_att_query_groups: int
-    use_head_norm: bool
-    init_identity_norm: bool
-    use_linear_self_attn: bool
-    linear_attn_type: str
-    linear_attn_mode: str
-    linear_attn_expand_k: float
-    linear_attn_expand_v: float
+    num_layers: Optional[int]
+    vocab_size: Optional[int]
+    embed_dim: Optional[int]
+    ff_dim: Optional[int]
+    att_heads: Optional[int]
+    seq_len: Optional[int]
+    stm_size: Optional[int]
+    use_flash_attention: Optional[bool]
+    use_gated: Optional[bool]
+    ff_activation: Optional[str]
+    ff_dropout: Optional[float]
+    att_dropout: Optional[float]
+    use_rms_norm: Optional[bool]
+    att_groups: Optional[int]
+    use_moe: Optional[bool]
+    num_experts: Optional[int]
+    num_shared_experts: Optional[int]
+    moe_top_k: Optional[int]
+    self_att_type: Optional[str]
+    cross_att_type: Optional[str]
+    att_query_groups: Optional[int]
+    cross_att_groups: Optional[int]
+    cross_att_query_groups: Optional[int]
+    use_head_norm: Optional[bool]
+    init_identity_norm: Optional[bool]
+    skip_memory_cross_attention: Optional[bool]
+    stateless_layers_config: Optional[list[Literal['dense', 'moe']]]
+    dense_layer_dim: Optional[int]
+    attn_layer_types: Optional[list[str]]
+    stateless_attn_layer_types: Optional[list[str]]
+    linear_attn_mode: Optional[str]
+    linear_attn_expand_k: Optional[float]
+    linear_attn_expand_v: Optional[float]
+    linear_attn_use_short_conv: Optional[bool]
+    linear_attn_conv_size: Optional[int]
+    linear_attn_use_gate: Optional[bool]
+    linear_attn_norm_eps: Optional[float]
+    linear_attn_heads: Optional[int]
+    use_nope: Optional[bool]
+    head_norm_type: Optional[str]
+    router_amp: Optional[bool]
+    router_dtype: Optional[torch.dtype]
+    use_vectorized_moe: Optional[bool]
+    vectorized_moe_from_legacy: Optional[bool]
 
 
 class RxTComponentBase(nn.Module):
@@ -103,6 +117,8 @@ class RxTComponentBase(nn.Module):
             head_norm_type: str = 'layer_norm',
             router_amp: bool = False,
             router_dtype: torch.dtype = torch.float32,
+            use_vectorized_moe: bool = True,
+            vectorized_moe_from_legacy: bool = False,
             **kwargs
     ):
         super(RxTComponentBase, self).__init__(**kwargs)
@@ -154,7 +170,7 @@ class RxTComponentBase(nn.Module):
                     attn_type = stateless_attn_layer_types[layer_idx] if self_att_type == 'hybrid' else self_att_type
 
                     if layer_type == 'dense':
-                        return ClassicTransformerLayer(
+                        return ReactiveTransformerLayer(
                             embed_dim,
                             dense_layer_dim,
                             use_gated=use_gated,
@@ -163,9 +179,11 @@ class RxTComponentBase(nn.Module):
                             ff_dropout=ff_dropout,
                             use_rms_norm=use_rms_norm,
                             self_attention=att_init(attn_type, layer_idx),
+                            memory_cross_attention=None,
+                            skip_memory_cross_attention=True,
                         )
                     else:
-                        return ClassicTransformerLayer(
+                        return ReactiveTransformerLayer(
                             embed_dim,
                             ff_dim,
                             use_gated=use_gated,
@@ -176,7 +194,13 @@ class RxTComponentBase(nn.Module):
                             ff_dropout=ff_dropout,
                             use_rms_norm=use_rms_norm,
                             self_attention=att_init(attn_type, layer_idx),
+                            memory_cross_attention=None,
+                            skip_memory_cross_attention=True,
                             num_shared_experts=num_shared_experts,
+                            router_amp=router_amp,
+                            router_dtype=router_dtype,
+                            use_vectorized_moe=use_vectorized_moe,
+                            vectorized_moe_from_legacy=vectorized_moe_from_legacy,
                         )
 
                 stateless_layers = nn.ModuleList([
@@ -205,6 +229,8 @@ class RxTComponentBase(nn.Module):
                     num_shared_experts=num_shared_experts,
                     router_amp=router_amp,
                     router_dtype=router_dtype,
+                    use_vectorized_moe=use_vectorized_moe,
+                    vectorized_moe_from_legacy=vectorized_moe_from_legacy,
                 ) for i in range(num_layers)
             ])
         else:
@@ -225,6 +251,8 @@ class RxTComponentBase(nn.Module):
                     num_shared_experts=num_shared_experts,
                     router_amp=router_amp,
                     router_dtype=router_dtype,
+                    use_vectorized_moe=use_vectorized_moe,
+                    vectorized_moe_from_legacy=vectorized_moe_from_legacy,
                 ) for i in range(num_layers)
             ])
             stateless_layers = None
@@ -282,9 +310,9 @@ class RxTComponentBase(nn.Module):
         for layer in self.model.layers:
             layer.update_max_len(max_seq_len)
 
-    def forward(self, x: torch.Tensor, attention_mask: torch.Tensor = None) -> Union[
+    def forward(self, x: torch.Tensor, attention_mask: torch.Tensor = None, profiler: RxTModelProfiler = None) -> Union[
         torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        return self.model(x, attention_mask=attention_mask)
+        return self.model(x, attention_mask=attention_mask, profiler=profiler)
 
 
 class RxTEncoderComponent(RxTComponentBase):
@@ -315,14 +343,14 @@ class RxTEncoderComponent(RxTComponentBase):
             use_moe=use_moe,
         )
 
-    def forward(self, x: torch.Tensor, attention_mask: torch.Tensor = None) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.model(x, attention_mask=attention_mask)
+    def forward(self, x: torch.Tensor, attention_mask: torch.Tensor = None, profiler: RxTModelProfiler = None) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.model(x, attention_mask=attention_mask, profiler=profiler)
 
 
 class RxTDecoderComponent(RxTComponentBase):
     """RxT-Alpha (Reactive Transformer) decoder model"""
 
-    def __init__(self, **kwargs):
+    def __init__(self, **kwargs: RxTComponentConfig):
         super(RxTDecoderComponent, self).__init__(True, **kwargs)
 
     def _init_model(
@@ -352,8 +380,8 @@ class RxTDecoderComponent(RxTComponentBase):
             head_norm_type=head_norm_type,
         )
 
-    def forward(self, x: torch.Tensor, attention_mask: torch.Tensor = None, stm_kv_cache: list[tuple[torch.Tensor, torch.Tensor]] = None, use_self_attn_cache: bool = False, current_positions: torch.Tensor = None) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.model(x, attention_mask=attention_mask, stm_kv_cache=stm_kv_cache, use_self_attn_cache=use_self_attn_cache, current_positions=current_positions)
+    def forward(self, x: torch.Tensor, attention_mask: torch.Tensor = None, stm_kv_cache: list[tuple[torch.Tensor, torch.Tensor]] = None, use_self_attn_cache: bool = False, current_positions: torch.Tensor = None, profiler: RxTModelProfiler = None) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.model(x, attention_mask=attention_mask, stm_kv_cache=stm_kv_cache, use_self_attn_cache=use_self_attn_cache, current_positions=current_positions, profiler=profiler)
 
 
 class RxTSimpleMemoryAttentionComponent(nn.Module):

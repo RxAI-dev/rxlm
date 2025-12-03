@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
-from typing import TypedDict, Iterator, Union
+from typing import TypedDict, Iterator, Union, Literal
+from datetime import datetime
 
 
 class TokenizedDict(TypedDict):
@@ -157,3 +158,137 @@ def get_gradient_norms(params: Iterator[nn.Parameter]):
     else:
         mean_norm = 0.0
     return total_norm, mean_norm
+
+
+class RxTModelProfiler:
+    def __init__(self, mode: Literal['decoder', 'encoder']):
+        self.step = 0
+        self.mode = mode
+        if self.mode == 'encoder':
+            self.encoder = {
+                'norm1': [],
+                'norm3': [],
+                'self_attn': [],
+                'ff': [],
+                'layer': [],
+                'embedding': [],
+                'head': []
+            }
+
+            self.encoder_temp = {
+                'norm1': [],
+                'norm3': [],
+                'self_attn': [],
+                'ff': [],
+                'layer': [],
+                'embedding': [],
+                'head': []
+            }
+
+            self.encoder_start = {
+                'norm1': 0.0,
+                'norm3': 0.0,
+                'self_attn': 0.0,
+                'ff': 0.0,
+                'layer': 0.0,
+                'embedding': 0.0,
+                'head': 0.0
+            }
+        else:
+            self.decoder = {
+                'norm1': [],
+                'norm2': [],
+                'norm3': [],
+                'self_attn': [],
+                'cross_attn': [],
+                'moe_router': [],
+                'moe_permute': [],
+                'moe_loop': [],
+                'moe_reverse': [],
+                'moe_shared': [],
+                'moe': [],
+                'ff': [],
+                'layer': [],
+                'head_norm': [],
+                'head': [],
+                'embedding': []
+            }
+
+            self.decoder_temp = {
+                'norm1': [],
+                'norm2': [],
+                'norm3': [],
+                'self_attn': [],
+                'cross_attn': [],
+                'moe_router': [],
+                'moe_permute': [],
+                'moe_loop': [],
+                'moe_reverse': [],
+                'moe_shared': [],
+                'moe': [],
+                'ff': [],
+                'layer': [],
+                'head_norm': [],
+                'head': [],
+                'embedding': []
+            }
+
+            self.decoder_start = {
+                'norm1': 0.0,
+                'norm2': 0.0,
+                'norm3': 0.0,
+                'self_attn': 0.0,
+                'cross_attn': 0.0,
+                'moe_router': 0.0,
+                'moe_permute': 0.0,
+                'moe_loop': 0.0,
+                'moe_reverse': 0.0,
+                'moe_shared': 0.0,
+                'moe': 0.0,
+                'ff': 0.0,
+                'layer': 0.0,
+                'head_norm': 0.0,
+                'head': 0.0,
+                'embedding': 0.0
+            }
+
+    def next_step(self):
+        self.step += 1
+        if self.mode == 'encoder':
+            for key, items in self.encoder_temp.items():
+                if len(items) > 0:
+                    self.encoder[key].append(sum(items) / len(items))
+        else:
+            for key, items in self.decoder_temp.items():
+                if len(items) > 0:
+                    self.decoder[key].append(sum(items) / len(items))
+
+        if self.step % 100 == 0:
+            if self.mode == 'encoder':
+                for key, items in self.encoder.items():
+                    if len(items) > 0:
+                        print(f'Encoder - {key}: {sum(items) / len(items)}s')
+                        self.encoder[key] = []
+            else:
+                for key, items in self.decoder.items():
+                    if len(items) > 0:
+                        print(f'Decoder - {key}: {sum(items) / len(items)}s')
+                        self.decoder[key] = []
+
+    def profile_start(self, key: str):
+        if self.mode == 'encoder':
+            stamp = datetime.timestamp(datetime.now())
+            self.encoder_start[key] = stamp
+        else:
+            stamp = datetime.timestamp(datetime.now())
+            self.decoder_start[key] = stamp
+
+    def profile_end(self, key: str):
+        if self.mode == 'encoder':
+            stamp = datetime.timestamp(datetime.now())
+            diff = stamp - self.encoder_start[key]
+            self.encoder_temp[key].append(diff)
+        else:
+            stamp = datetime.timestamp(datetime.now())
+            diff = stamp - self.decoder_start[key]
+            self.decoder_temp[key].append(diff)

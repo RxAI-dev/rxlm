@@ -3,7 +3,8 @@ import torch.nn as nn
 from typing import Literal, Optional
 from .attention import MultiHeadAttention, LinearAttention
 from .ff import FeedForward, GatedFeedForward
-from .moe import MoeFeedForward, GatedMoeFeedForward
+from .moe import MoeFeedForward, GatedMoeFeedForward, VectorizedMoeFeedForward, VectorizedGatedMoeFeedForward
+from ..training.utils import RxTModelProfiler
 
 
 class ReactiveTransformerLayer(nn.Module):
@@ -24,6 +25,8 @@ class ReactiveTransformerLayer(nn.Module):
             num_experts: int = 1,
             num_shared_experts: int = 0,
             moe_top_k: int = 1,
+            use_vectorized_moe: bool = True,
+            vectorized_moe_from_legacy: bool = False,
             use_moe_att: bool = False,
             skip_memory_cross_attention: bool = False,
             router_amp: bool = False,
@@ -43,16 +46,34 @@ class ReactiveTransformerLayer(nn.Module):
 
         if use_gated:
             if use_moe:
-                self.ff = GatedMoeFeedForward(embed_dim, ff_dim, num_experts, ff_activation, top_k=moe_top_k,
-                                              dropout=ff_dropout, num_shared_experts=num_shared_experts,
-                                              router_amp=router_amp, router_dtype=router_dtype)
+                if use_vectorized_moe:
+                    self.ff = VectorizedGatedMoeFeedForward(
+                        embed_dim, ff_dim, num_experts, ff_activation,
+                        top_k=moe_top_k, dropout=ff_dropout, num_shared_experts=num_shared_experts,
+                        router_amp=router_amp, router_dtype=router_dtype, from_legacy=vectorized_moe_from_legacy
+                    )
+                else:
+                    self.ff = GatedMoeFeedForward(
+                        embed_dim, ff_dim, num_experts, ff_activation,
+                        top_k=moe_top_k, dropout=ff_dropout, num_shared_experts=num_shared_experts,
+                        router_amp=router_amp, router_dtype=router_dtype
+                    )
             else:
                 self.ff = GatedFeedForward(embed_dim, ff_dim, ff_activation, dropout=ff_dropout)
         else:
             if use_moe:
-                self.ff = MoeFeedForward(embed_dim, ff_dim, num_experts, ff_activation, top_k=moe_top_k,
-                                         dropout=ff_dropout, num_shared_experts=num_shared_experts,
-                                         router_amp=router_amp, router_dtype=router_dtype)
+                if use_vectorized_moe:
+                    self.ff = VectorizedMoeFeedForward(
+                        embed_dim, ff_dim, num_experts, ff_activation,
+                        top_k=moe_top_k, dropout=ff_dropout, num_shared_experts=num_shared_experts,
+                        router_amp=router_amp, router_dtype=router_dtype, from_legacy=vectorized_moe_from_legacy
+                    )
+                else:
+                    self.ff = MoeFeedForward(
+                        embed_dim, ff_dim, num_experts, ff_activation,
+                        top_k=moe_top_k, dropout=ff_dropout, num_shared_experts=num_shared_experts,
+                        router_amp=router_amp, router_dtype=router_dtype
+                    )
             else:
                 self.ff = FeedForward(embed_dim, ff_dim, ff_activation, dropout=ff_dropout)
 
@@ -136,40 +157,76 @@ class ReactiveTransformerLayer(nn.Module):
         else:
             return None
 
-    def forward(self, x: torch.Tensor, stm: torch.Tensor, mask: torch.Tensor = None, stm_kv_cache: tuple[torch.Tensor, torch.Tensor] = None, use_self_attn_cache: bool = False, current_positions: torch.Tensor = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, stm: torch.Tensor = None, mask: torch.Tensor = None, stm_kv_cache: tuple[torch.Tensor, torch.Tensor] = None, use_self_attn_cache: bool = False, current_positions: torch.Tensor = None, profiler: RxTModelProfiler = None) -> torch.Tensor:
         # First step, self-attention
+        if profiler is not None:
+            profiler.profile_start('norm1')
         residual = x
         if not self.use_post_norm:
             x = self.norm1(x)
+        if profiler is not None:
+            profiler.profile_end('norm1')
+
+        if profiler is not None:
+            profiler.profile_start('self_attn')
         x = self.attention(x, x, x, mask=mask, use_self_attn_cache=use_self_attn_cache,
                              current_positions=current_positions)
-
         x = residual + x
+
+        if profiler is not None:
+            profiler.profile_end('self_attn')
+
         if self.use_post_norm:
             x = self.norm1(x)
 
         # Second step, Memory cross-attention
-        if not self.skip_memory_cross_attention:
+        if not self.skip_memory_cross_attention and stm is not None:
+            if profiler is not None:
+                profiler.profile_start('norm2')
             residual = x
             if not self.use_post_norm:
                 x = self.norm2(x)
 
+            if profiler is not None:
+                profiler.profile_end('norm2')
+
             # normalize STM and prepare STM mask
+            if profiler is not None:
+                profiler.profile_start('cross_attn')
             stm = self.stm_norm(stm)
             mem_mask = mask.squeeze(1).unsqueeze(-1).expand(-1, -1, -1, stm.size(1)) \
                 if mask is not None else None
 
             x = self.memory_cross_attention(x, stm, stm, mask=mem_mask, stm_kv_cache=stm_kv_cache, current_positions=current_positions)
             x = residual + x
+
+            if profiler is not None:
+                profiler.profile_end('cross_attn')
+
             if self.use_post_norm:
                 x = self.norm2(x)
 
         # Third step, Feed Forward network
+        if profiler is not None:
+            profiler.profile_start('norm3')
         residual = x
         if not self.use_post_norm:
             x = self.norm3(x)
-        x = self.ff(x)
+        if profiler is not None:
+            profiler.profile_end('norm3')
+
+
+        if profiler is not None:
+            profiler.profile_start('ff' if not self.use_moe else 'moe')
+        if self.use_moe:
+            x = self.ff(x, profiler=profiler)
+        else:
+            x = self.ff(x)
         x = residual + x
+
+        if profiler is not None:
+            profiler.profile_end('ff' if not self.use_moe else 'moe')
+
         if self.use_post_norm:
             x = self.norm3(x)
         return x

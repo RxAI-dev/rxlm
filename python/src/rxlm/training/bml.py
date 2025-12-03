@@ -8,6 +8,7 @@ from sklearn.metrics import f1_score
 from ..training.base import BaseTrainer
 from .models import JointTrainingModel
 from .ddp import distributed_mean
+from .utils import RxTModelProfiler
 
 
 class JointLMTrainer(BaseTrainer):
@@ -258,6 +259,7 @@ class IterativeJointLMTrainer(JointLMTrainer):
             collect_log_interval: int = 100,
             use_iterable_dataset: bool = True,
             debug_timing: bool = False,
+            profilers: tuple[RxTModelProfiler, RxTModelProfiler] = (None, None),
             **kwargs
     ):
         super().__init__(
@@ -280,6 +282,7 @@ class IterativeJointLMTrainer(JointLMTrainer):
         self.use_te_fp8 = use_te_fp8
         self.collect_log_interval = collect_log_interval
         self.debug_timing = debug_timing
+        self.profilers = profilers
         if use_te_fp8:
             self.use_amp = False
 
@@ -542,5 +545,49 @@ class IterativeJointLMTrainer(JointLMTrainer):
                 ) for k, v in batch.items()
             }
             (encoder_loss, decoder_loss), (encoder_logits, decoder_logits) = self.compute_loss(batch)
+
+        return (encoder_loss, decoder_loss), (encoder_logits, decoder_logits)
+
+    def compute_loss(self, batch: dict[str, dict[str, torch.Tensor]]) -> tuple[
+        tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
+        encoder_inputs = batch['encoder']['input_ids']
+        encoder_labels = batch['encoder']['labels']
+        decoder_inputs = batch['decoder']['input_ids']
+        decoder_targets = batch['decoder']['targets']
+        attention_mask = batch['attention_mask']
+
+        encoder_logits, decoder_logits = self.model(
+            encoder_inputs,
+            decoder_inputs,
+            attention_mask=attention_mask,
+            noise_level=self.fake_stm_noise_level,
+            profilers=self.profilers,
+        )
+
+        for profiler in self.profilers:
+            profiler.next_step()
+
+        encoder_loss = F.cross_entropy(
+            encoder_logits.view(-1, self.vocab_size),
+            encoder_labels.view(-1),
+            ignore_index=-100
+        )
+
+        shifted_logits = decoder_logits[:, :-1].contiguous()
+        shifted_targets = decoder_targets[:, 1:].contiguous()
+
+        if self.is_sft:
+            decoder_loss = F.cross_entropy(
+                shifted_logits.view(-1, self.vocab_size),
+                shifted_targets.view(-1),
+                ignore_index=-100
+            )
+        else:
+            decoder_loss = F.cross_entropy(
+                shifted_logits.view(-1, self.vocab_size),
+                shifted_targets.view(-1)
+            )
+
+        decoder_loss = self._moe_aux_loss(decoder_loss)
 
         return (encoder_loss, decoder_loss), (encoder_logits, decoder_logits)

@@ -3,7 +3,7 @@ import torch.nn as nn
 from .positional import AbsolutePositionalEmbedding
 from .mask import create_causal_mask
 from ..memory.stm import ShortTermMemory
-
+from ..training.utils import RxTModelProfiler
 
 class ReactiveTransformerBase(nn.Module):
     """Base class for Reactive Transformer models - common logic for both decoders and encoders."""
@@ -63,7 +63,7 @@ class ReactiveTransformerBase(nn.Module):
         else:
             return None
 
-    def _handle_layer(self, i: int, x: torch.Tensor, mask: torch.Tensor = None, is_shared: bool = False, stm_kv_cache: list[tuple[torch.Tensor, torch.Tensor]] = None, use_self_attn_cache: bool = False, current_positions: torch.Tensor = None):
+    def _handle_layer(self, i: int, x: torch.Tensor, mask: torch.Tensor = None, is_shared: bool = False, stm_kv_cache: list[tuple[torch.Tensor, torch.Tensor]] = None, use_self_attn_cache: bool = False, current_positions: torch.Tensor = None, profiler: RxTModelProfiler = None):
         stm_layer_idx = i if is_shared else i + self.num_shared_layers
         layer_stm = self.stm(stm_layer_idx)
         # expand layer STM to batch size, if it's not in batch mode
@@ -71,7 +71,7 @@ class ReactiveTransformerBase(nn.Module):
             layer_stm = layer_stm.expand(x.size(0), -1, -1)
         layer = self.shared_layers[i] if is_shared else self.layers[i]
         layer_stm_cache = stm_kv_cache[stm_layer_idx] if stm_kv_cache is not None else None
-        return layer(x, layer_stm, mask=mask, stm_kv_cache=layer_stm_cache, use_self_attn_cache=use_self_attn_cache, current_positions=current_positions)
+        return layer(x, layer_stm, mask=mask, stm_kv_cache=layer_stm_cache, use_self_attn_cache=use_self_attn_cache, current_positions=current_positions, profiler=profiler)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Shared logic for encoders and decoders - apply embeddings and positional encoding
@@ -170,7 +170,9 @@ class ReactiveTransformerDecoder(ReactiveTransformerBase):
         for i in range(self.num_own_layers):
             self.layers[i].attention.reset_inner_cache()
 
-    def forward(self, x: torch.Tensor, attention_mask: torch.Tensor = None, stm_kv_cache: list[tuple[torch.Tensor, torch.Tensor]] = None, use_self_attn_cache: bool = False, current_positions: torch.Tensor = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, attention_mask: torch.Tensor = None, stm_kv_cache: list[tuple[torch.Tensor, torch.Tensor]] = None, use_self_attn_cache: bool = False, current_positions: torch.Tensor = None, profiler: RxTModelProfiler = None) -> torch.Tensor:
+        if profiler is not None:
+            profiler.profile_start('embedding')
         x = super().forward(x)  # apply embeddings
         seq_len = x.size(1)
         if not self.use_flash_attention and self.use_relative_embedding:
@@ -181,6 +183,10 @@ class ReactiveTransformerDecoder(ReactiveTransformerBase):
             mask = attention_mask.unsqueeze(1).unsqueeze(1).bool()
         else:
             mask = None
+
+        if profiler is not None:
+            profiler.profile_end('embedding')
+
         # Process stateless layers
         if self.stateless_layers is not None:
             for layer in self.stateless_layers:
@@ -189,18 +195,48 @@ class ReactiveTransformerDecoder(ReactiveTransformerBase):
         # Process shared layers
         if self.shared_layers is not None:
             for i in range(self.num_shared_layers):
-                x = self._handle_layer(i, x, mask=mask, is_shared=True, stm_kv_cache=stm_kv_cache, use_self_attn_cache=use_self_attn_cache, current_positions=current_positions)
+                if profiler is not None:
+                    profiler.profile_start('layer')
+                x = self._handle_layer(i, x, mask=mask, is_shared=True, stm_kv_cache=stm_kv_cache, use_self_attn_cache=use_self_attn_cache, current_positions=current_positions, profiler=profiler)
+                if profiler is not None:
+                    profiler.profile_end('layer')
         # Process own layers
         for i in range(self.num_own_layers):
-            x = self._handle_layer(i, x, mask=mask, stm_kv_cache=stm_kv_cache, use_self_attn_cache=use_self_attn_cache, current_positions=current_positions)
-        return self.head(self.head_norm(x) if self.use_head_norm else x)
+            if profiler is not None:
+                profiler.profile_start('layer')
+            x = self._handle_layer(i, x, mask=mask, stm_kv_cache=stm_kv_cache, use_self_attn_cache=use_self_attn_cache, current_positions=current_positions, profiler=profiler)
+            if profiler is not None:
+                profiler.profile_end('layer')
+
+        if profiler is not None:
+            profiler.profile_start('head_norm')
+
+        x = self.head_norm(x) if self.use_head_norm else x
+
+        if profiler is not None:
+            profiler.profile_end('head_norm')
+
+        if profiler is not None:
+            profiler.profile_start('head')
+
+        x = self.head(x)
+
+        if profiler is not None:
+            profiler.profile_end('head')
+
+        return x
 
 
 class ReactiveTransformerEncoder(ReactiveTransformerBase):
     """Reactive Transformer encoder - extending the classic Transformer encoder with Memory Cross-Attention"""
 
-    def forward(self, x: torch.Tensor, attention_mask: torch.Tensor = None) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor, attention_mask: torch.Tensor = None, profiler: RxTModelProfiler = None) -> tuple[torch.Tensor, torch.Tensor]:
+        if profiler is not None:
+            profiler.profile_start('embedding')
         x = super().forward(x)  # apply embeddings
+        if profiler is not None:
+            profiler.profile_end('embedding')
+
         if attention_mask is not None:
             attention_mask = attention_mask.unsqueeze(1).unsqueeze(1).bool()
 
@@ -208,12 +244,20 @@ class ReactiveTransformerEncoder(ReactiveTransformerBase):
         # Process shared layers
         if self.shared_layers is not None:
             for i in range(self.num_shared_layers):
-                x = self._handle_layer(i, x, mask=attention_mask, is_shared=True)
+                if profiler is not None:
+                    profiler.profile_start('layer')
+                x = self._handle_layer(i, x, mask=attention_mask, is_shared=True, profiler=profiler)
                 hidden_states.append(x)
+                if profiler is not None:
+                    profiler.profile_end('layer')
         # Process own layers
         for i in range(self.num_own_layers):
-            x = self._handle_layer(i, x, mask=attention_mask)
+            if profiler is not None:
+                profiler.profile_start('layer')
+            x = self._handle_layer(i, x, mask=attention_mask, profiler=profiler)
             hidden_states.append(x)
+            if profiler is not None:
+                profiler.profile_end('layer')
         return x, torch.stack(hidden_states)
 
 

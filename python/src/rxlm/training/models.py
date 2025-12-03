@@ -8,6 +8,7 @@ from ..rxt.models import (
     RxTDecoder, RxTEncoder, RxTSimpleMemoryAttention,
     RxTSelfMemoryAttention, RxTInterlayerMemoryAttention, RxTSelfInterlayerMemoryAttention
 )
+from .utils import RxTModelProfiler
 
 RxTMemoryAttentionType: TypeAlias = Union[
     RxTSimpleMemoryAttention, RxTSelfMemoryAttention,
@@ -51,18 +52,24 @@ class JointTrainingModel(nn.Module):
         y_d = self.decoder(x_d, attention_mask=attention_mask)
         return y_d
 
-    def forward(self, x_e: torch.Tensor, x_d: torch.Tensor, attention_mask: torch.Tensor = None, noise_level: float = None) -> tuple[
+    def forward(self, x_e: torch.Tensor, x_d: torch.Tensor, attention_mask: torch.Tensor = None, noise_level: float = None, profilers: tuple[RxTModelProfiler, RxTModelProfiler] = (None, None)) -> tuple[
         torch.Tensor, torch.Tensor]:
+        encoder_profiler, decoder_profiler = profilers
+
         self.decoder.model.stm.reset()
 
-        encoder_result, encoded_layers = self.encoder(x_e, attention_mask=attention_mask)
+        encoder_result, encoded_layers = self.encoder(x_e, attention_mask=attention_mask, profiler=encoder_profiler)
+        if encoder_profiler is not None:
+            encoder_profiler.profile_start('head')
         y_e = self.mlm_head(encoder_result)
+        if encoder_profiler is not None:
+            encoder_profiler.profile_end('head')
 
         detached_layers = encoded_layers.clone().detach()
         fake_stm = detached_layers if noise_level is None else detached_layers + noise_level * torch.randn_like(detached_layers, device=detached_layers.device)
 
         self.decoder.model.stm.update_all(fake_stm)
-        y_d = self.decoder(x_d, attention_mask=attention_mask)
+        y_d = self.decoder(x_d, attention_mask=attention_mask, profiler=decoder_profiler)
         return y_e, y_d
 
 
