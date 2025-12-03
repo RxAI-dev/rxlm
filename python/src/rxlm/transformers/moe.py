@@ -41,6 +41,14 @@ import torch.nn.functional as F
 from .ff import FeedForward, GatedFeedForward
 from ..training.utils import RxTModelProfiler
 
+# Try to import grouped_gemm - optional dependency
+try:
+    import grouped_gemm as gg
+    GROUPED_GEMM_AVAILABLE = True
+except ImportError:
+    GROUPED_GEMM_AVAILABLE = False
+    gg = None
+
 class MoeRouter(nn.Module):
     """Mixture-of-Experts Router layer - computes routing weights for each expert."""
 
@@ -396,6 +404,7 @@ class VectorizedMoeFeedForward(nn.Module):
             router_amp: bool = False,
             router_dtype: torch.dtype = torch.float32,
             from_legacy: bool = False,
+            use_grouped_gemm: bool = False,
             *args,
             **kwargs
     ):
@@ -409,6 +418,12 @@ class VectorizedMoeFeedForward(nn.Module):
         self.router_dtype = router_dtype
         self.activation = activation
         self.dropout_p = dropout
+        self.use_grouped_gemm = use_grouped_gemm and GROUPED_GEMM_AVAILABLE
+
+        # Warn if grouped_gemm requested but not available
+        if use_grouped_gemm and not GROUPED_GEMM_AVAILABLE:
+            print("WARNING: grouped_gemm requested but not available. Install with: pip install grouped_gemm")
+            print("Falling back to standard vectorized implementation.")
 
         self.router = MoeRouter(embed_dim, num_experts, top_k)
 
@@ -506,6 +521,65 @@ class VectorizedMoeFeedForward(nn.Module):
         # Second linear layer: [E, T, H] @ [E, H, D] -> [E, T, D]
         output = torch.bmm(hidden, self.w2)  # [num_experts, max_tokens, embed_dim]
         output = output + self.b2.unsqueeze(1)  # Add bias
+
+        return output
+
+    def _expand_bias(self, bias: torch.Tensor, tokens_per_expert: torch.Tensor) -> torch.Tensor:
+        """
+        Expand bias [num_experts, dim] -> [total_tokens, dim] based on tokens_per_expert.
+
+        Each expert's bias is repeated for all tokens assigned to that expert.
+
+        Args:
+            bias: [num_experts, dim] - bias tensor for all experts
+            tokens_per_expert: [num_experts] - number of tokens per expert
+
+        Returns:
+            [total_tokens, dim] - expanded bias tensor
+        """
+        # bias[i] should be added to all tokens of expert i
+        # torch.repeat_interleave repeats each expert's bias tokens_per_expert[i] times
+        expanded = torch.repeat_interleave(bias, tokens_per_expert, dim=0)
+        return expanded
+
+    def _grouped_gemm_expert_forward(
+        self,
+        dispatched_x: torch.Tensor,
+        tokens_per_expert: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Grouped GEMM expert computation - zero padding, contiguous layout.
+
+        This method uses the grouped_gemm library for efficient expert computation
+        without padding overhead. It expects:
+        - dispatched_x: tokens sorted by expert in contiguous layout
+        - tokens_per_expert: count of tokens for each expert
+
+        Args:
+            dispatched_x: [total_tokens, embed_dim] - tokens sorted by expert
+            tokens_per_expert: [num_experts] - count of tokens assigned to each expert
+
+        Returns:
+            [total_tokens, embed_dim] - expert outputs in same order as dispatched_x
+        """
+        # Weight format for grouped_gemm:
+        # - Our weights are stored as [num_experts, in_features, out_features]
+        # - w1: [E, embed_dim, hidden_dim] for input -> hidden
+        # - w2: [E, hidden_dim, embed_dim] for hidden -> output
+        # - With trans_b=False, gmm does: input @ weight per expert
+
+        # FC1: [total_tokens, embed_dim] @ [E, embed_dim, hidden_dim] -> [total_tokens, hidden_dim]
+        hidden = gg.ops.gmm(dispatched_x, self.w1, tokens_per_expert, trans_b=False)
+        hidden = hidden + self._expand_bias(self.b1, tokens_per_expert)
+        hidden = self.activation(hidden)
+
+        # Dropout
+        if self.dropout is not None:
+            hidden = self.dropout(hidden)
+
+        # FC2: [total_tokens, hidden_dim] @ [E, hidden_dim, embed_dim] -> [total_tokens, embed_dim]
+        output = gg.ops.gmm(hidden, self.w2, tokens_per_expert, trans_b=False)
+        output = output + self._expand_bias(self.b2, tokens_per_expert)
 
         return output
 
@@ -683,10 +757,15 @@ class VectorizedMoeFeedForward(nn.Module):
             if profiler is not None:
                 profiler.profile_start('moe_loop')
 
-            # Vectorized expert forward pass
-            concatenated_outputs = self._vectorized_expert_forward(
-                dispatched_x, sorted_expert_indices, tokens_per_expert, starts
-            )
+            # Vectorized expert forward pass - use grouped_gemm if enabled
+            if self.use_grouped_gemm:
+                concatenated_outputs = self._grouped_gemm_expert_forward(
+                    dispatched_x, tokens_per_expert
+                )
+            else:
+                concatenated_outputs = self._vectorized_expert_forward(
+                    dispatched_x, sorted_expert_indices, tokens_per_expert, starts
+                )
 
             if profiler is not None:
                 profiler.profile_end('moe_loop')
@@ -810,6 +889,41 @@ class VectorizedGatedMoeFeedForward(VectorizedMoeFeedForward):
         # Second linear layer: [E, T, H] @ [E, H, D] -> [E, T, D]
         output = torch.bmm(hidden, self.w2)  # [num_experts, max_tokens, embed_dim]
         output = output + self.b2.unsqueeze(1)  # Add bias
+
+        return output
+
+    def _grouped_gemm_expert_forward(
+        self,
+        dispatched_x: torch.Tensor,
+        tokens_per_expert: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Grouped GEMM expert computation for gated experts - zero padding.
+
+        Args:
+            dispatched_x: [total_tokens, embed_dim] - tokens sorted by expert
+            tokens_per_expert: [num_experts] - count of tokens assigned to each expert
+
+        Returns:
+            [total_tokens, embed_dim] - expert outputs in same order as dispatched_x
+        """
+        # FC1 (Gated): [total_tokens, embed_dim] @ [E, embed_dim, hidden_dim * 2] -> [total_tokens, hidden_dim * 2]
+        gated_hidden = gg.ops.gmm(dispatched_x, self.w1, tokens_per_expert, trans_b=False)
+        gated_hidden = gated_hidden + self._expand_bias(self.b1, tokens_per_expert)
+
+        # Split into linear and gate components
+        l, g = gated_hidden.chunk(2, dim=-1)  # Each: [total_tokens, hidden_dim]
+
+        # Apply gating: l * activation(g)
+        hidden = l * self.activation(g)
+
+        # Dropout
+        if self.dropout is not None:
+            hidden = self.dropout(hidden)
+
+        # FC2: [total_tokens, hidden_dim] @ [E, hidden_dim, embed_dim] -> [total_tokens, embed_dim]
+        output = gg.ops.gmm(hidden, self.w2, tokens_per_expert, trans_b=False)
+        output = output + self._expand_bias(self.b2, tokens_per_expert)
 
         return output
 
