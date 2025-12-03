@@ -86,16 +86,22 @@ class ReactiveTransformerDecoder(ReactiveTransformerBase):
 
     def __init__(
             self, embed_dim: int, vocab_size: int, use_head_norm: bool = False,
-            init_identity_norm: bool = False, stateless_layers: nn.ModuleList = None,  *args, **kwargs):
+            init_identity_norm: bool = False, stateless_layers: nn.ModuleList = None,
+            head_norm_type: str = 'layer_norm',  *args, **kwargs):
         super(ReactiveTransformerDecoder, self).__init__(*args, **kwargs)
 
         self.head = nn.Linear(embed_dim, vocab_size)
         self.use_head_norm = use_head_norm
         if use_head_norm:
-            self.head_norm = nn.LayerNorm(embed_dim)
-            if init_identity_norm:
-                self.head_norm.weight.data.fill_(1.0)
-                self.head_norm.bias.data.fill_(0.0)
+            if head_norm_type == 'rms_norm':
+                self.head_norm = nn.RMSNorm(embed_dim)
+            elif head_norm_type == 'layer_norm':
+                self.head_norm = nn.LayerNorm(embed_dim)
+                if init_identity_norm:
+                    self.head_norm.weight.data.fill_(1.0)
+                    self.head_norm.bias.data.fill_(0.0)
+            else:
+                raise ValueError(f"head_norm_type must be 'layer_norm' or 'rms_norm', got '{head_norm_type}'")
         else:
             self.head_norm = None
         self.stateless_layers = stateless_layers

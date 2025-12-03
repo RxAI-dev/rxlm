@@ -77,6 +77,7 @@ class RxTComponentBase(nn.Module):
             att_groups: int = 1,
             use_moe: bool = False,
             num_experts: int = 1,
+            num_shared_experts: int = 1,
             moe_top_k: int = 1,
             self_att_type: str = 'sqa',
             cross_att_type: str = 'sqa',
@@ -99,6 +100,9 @@ class RxTComponentBase(nn.Module):
             linear_attn_norm_eps: float = 1e-5,
             linear_attn_heads: int = None,
             use_nope: bool = False,
+            head_norm_type: str = 'layer_norm',
+            router_amp: bool = False,
+            router_dtype: torch.dtype = torch.float32,
             **kwargs
     ):
         super(RxTComponentBase, self).__init__(**kwargs)
@@ -172,6 +176,7 @@ class RxTComponentBase(nn.Module):
                             ff_dropout=ff_dropout,
                             use_rms_norm=use_rms_norm,
                             self_attention=att_init(attn_type, layer_idx),
+                            num_shared_experts=num_shared_experts,
                         )
 
                 stateless_layers = nn.ModuleList([
@@ -197,6 +202,9 @@ class RxTComponentBase(nn.Module):
                     use_rms_norm=use_rms_norm,
                     self_attention=att_init(get_attn_type(i), get_layer_idx(i)),
                     memory_cross_attention=cross_att_init(),
+                    num_shared_experts=num_shared_experts,
+                    router_amp=router_amp,
+                    router_dtype=router_dtype,
                 ) for i in range(num_layers)
             ])
         else:
@@ -214,18 +222,23 @@ class RxTComponentBase(nn.Module):
                     self_attention=att_init(self_att_type, i),
                     memory_cross_attention=None,
                     skip_memory_cross_attention=skip_memory_cross_attention,
+                    num_shared_experts=num_shared_experts,
+                    router_amp=router_amp,
+                    router_dtype=router_dtype,
                 ) for i in range(num_layers)
             ])
             stateless_layers = None
 
         self.model = self._init_model(
             stm, layers, embedding, use_flash_attention, embed_dim, vocab_size, use_moe,
-            use_head_norm=use_head_norm, init_identity_norm=init_identity_norm, stateless_layers=stateless_layers
+            use_head_norm=use_head_norm, init_identity_norm=init_identity_norm,
+            stateless_layers=stateless_layers, head_norm_type=head_norm_type,
         )
 
     def _init_model(self, stm: ShortTermMemory, layers: nn.ModuleList, embedding: nn.Embedding,
                     use_flash_attention: bool, embed_dim: int, vocab_size: int, use_moe: bool,
-                    use_head_norm: bool = False, init_identity_norm: bool = False, stateless_layers: nn.ModuleList = None) -> ReactiveTransformerBase:
+                    use_head_norm: bool = False, init_identity_norm: bool = False,
+                    stateless_layers: nn.ModuleList = None, head_norm_type: str = 'layer_norm') -> ReactiveTransformerBase:
         pass
 
     def params_count(self):
@@ -292,6 +305,7 @@ class RxTEncoderComponent(RxTComponentBase):
             use_head_norm: bool = False,
             init_identity_norm: bool = False,
             stateless_layers: nn.ModuleList = None,
+            head_norm_type: str = 'layer_norm'
     ) -> ReactiveTransformerEncoder:
         return ReactiveTransformerEncoder(
             stm=stm,
@@ -322,6 +336,7 @@ class RxTDecoderComponent(RxTComponentBase):
             use_head_norm: bool = False,
             init_identity_norm: bool = False,
             stateless_layers: nn.ModuleList = None,
+            head_norm_type: str = 'layer_norm'
     ) -> ReactiveTransformerDecoder:
         return ReactiveTransformerDecoder(
             embed_dim,
@@ -334,6 +349,7 @@ class RxTDecoderComponent(RxTComponentBase):
             use_head_norm=use_head_norm,
             init_identity_norm=init_identity_norm,
             stateless_layers=stateless_layers,
+            head_norm_type=head_norm_type,
         )
 
     def forward(self, x: torch.Tensor, attention_mask: torch.Tensor = None, stm_kv_cache: list[tuple[torch.Tensor, torch.Tensor]] = None, use_self_attn_cache: bool = False, current_positions: torch.Tensor = None) -> tuple[torch.Tensor, torch.Tensor]:

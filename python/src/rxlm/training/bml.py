@@ -3,6 +3,7 @@ import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel
 import math
 from typing import Union
+from datetime import datetime
 from sklearn.metrics import f1_score
 from ..training.base import BaseTrainer
 from .models import JointTrainingModel
@@ -256,6 +257,7 @@ class IterativeJointLMTrainer(JointLMTrainer):
             fp8_margin: int = 0,
             collect_log_interval: int = 100,
             use_iterable_dataset: bool = True,
+            debug_timing: bool = False,
             **kwargs
     ):
         super().__init__(
@@ -277,6 +279,7 @@ class IterativeJointLMTrainer(JointLMTrainer):
         self.collect_n_batches = collect_n_batches
         self.use_te_fp8 = use_te_fp8
         self.collect_log_interval = collect_log_interval
+        self.debug_timing = debug_timing
         if use_te_fp8:
             self.use_amp = False
 
@@ -392,11 +395,24 @@ class IterativeJointLMTrainer(JointLMTrainer):
             base_batch_idx: int,
             batch_size: int
     ):
+        start_time = None
         """Train on collected batches"""
         for i, batch in enumerate(collected_batches):
             if not self.is_running:
                 break
             if self.get_batch_size(batch) == batch_size:
+                if self.debug_timing:
+                    if i == 100:
+                        start_time = datetime.timestamp(datetime.now())
+                    elif i == 200:
+                        end_time = datetime.timestamp(datetime.now())
+                        b100_time = end_time - start_time
+                        b_time = b100_time / 100.0
+                        i_time = b_time / batch_size
+                        print(f'100 batches time: {b100_time}')
+                        print(f'1 batch time: {b_time}')
+                        print(f'item time: {i_time}')
+
                 self.total_steps += 1
                 self.epoch_steps = base_batch_idx + i + 1
                 accumulated_tokens += batch['attention_mask'].sum()
