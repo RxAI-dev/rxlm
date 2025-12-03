@@ -494,27 +494,8 @@ class VectorizedMoeFeedForward(nn.Module):
             return torch.zeros_like(dispatched_x)
 
         # === STEP 1: Compute position of each token within its expert ===
-        # Fully vectorized using cumsum trick - no Python loop!
-
-        # Create a mask for where expert changes (or starts)
-        expert_change = torch.cat([
-            torch.tensor([True], device=sorted_expert_indices.device),
-            sorted_expert_indices[1:] != sorted_expert_indices[:-1]
-        ])
-
-        # Cumulative sum resets at expert boundaries
-        ones = torch.ones(total_tokens, dtype=torch.long, device=dispatched_x.device)
-        expert_token_positions = ones.cumsum(0) - 1  # Positions within full sorted array
-
-        # Subtract the starting position for each expert to get positions within expert
-        expert_start_positions = torch.zeros(total_tokens, dtype=torch.long, device=dispatched_x.device)
-        expert_start_positions[expert_change] = expert_token_positions[expert_change]
-
-        # Use cummax to propagate start positions forward
-        expert_start_positions = torch.cummax(expert_start_positions, dim=0)[0]
-
-        # Subtract to get position within each expert
-        expert_token_positions = expert_token_positions - expert_start_positions
+        token_positions = torch.arange(total_tokens, device=dispatched_x.device)
+        expert_token_positions = token_positions - starts[sorted_expert_indices]
 
         # === STEP 2: Create padded tensor [num_experts, max_tokens, embed_dim] ===
         padded_input = torch.zeros(
