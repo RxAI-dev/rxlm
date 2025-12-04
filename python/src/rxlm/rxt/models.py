@@ -67,6 +67,7 @@ class RxTComponentConfig(TypedDict):
     router_dtype: Optional[torch.dtype]
     use_vectorized_moe: Optional[bool]
     vectorized_moe_from_legacy: Optional[bool]
+    moe_grouped_gemm: Optional[bool]
 
 
 class RxTComponentBase(nn.Module):
@@ -119,6 +120,10 @@ class RxTComponentBase(nn.Module):
             router_dtype: torch.dtype = torch.float32,
             use_vectorized_moe: bool = True,
             vectorized_moe_from_legacy: bool = False,
+            moe_grouped_gemm: bool = True,
+            moe_bias_mode: Literal['global', 'local', 'off'] = 'global',
+            moe_shared_experts_bias_mode: Literal['global', 'local', 'off'] = 'local',
+            moe_use_weighted_shared_experts: bool = True,
             **kwargs
     ):
         super(RxTComponentBase, self).__init__(**kwargs)
@@ -201,6 +206,10 @@ class RxTComponentBase(nn.Module):
                             router_dtype=router_dtype,
                             use_vectorized_moe=use_vectorized_moe,
                             vectorized_moe_from_legacy=vectorized_moe_from_legacy,
+                            moe_grouped_gemm=moe_grouped_gemm,
+                            moe_bias_mode=moe_bias_mode,
+                            moe_shared_experts_bias_mode=moe_shared_experts_bias_mode,
+                            moe_use_weighted_shared_experts=moe_use_weighted_shared_experts,
                         )
 
                 stateless_layers = nn.ModuleList([
@@ -231,6 +240,10 @@ class RxTComponentBase(nn.Module):
                     router_dtype=router_dtype,
                     use_vectorized_moe=use_vectorized_moe,
                     vectorized_moe_from_legacy=vectorized_moe_from_legacy,
+                    moe_grouped_gemm=moe_grouped_gemm,
+                    moe_bias_mode=moe_bias_mode,
+                    moe_shared_experts_bias_mode=moe_shared_experts_bias_mode,
+                    moe_use_weighted_shared_experts=moe_use_weighted_shared_experts,
                 ) for i in range(num_layers)
             ])
         else:
@@ -253,6 +266,10 @@ class RxTComponentBase(nn.Module):
                     router_dtype=router_dtype,
                     use_vectorized_moe=use_vectorized_moe,
                     vectorized_moe_from_legacy=vectorized_moe_from_legacy,
+                    moe_grouped_gemm=moe_grouped_gemm,
+                    moe_bias_mode=moe_bias_mode,
+                    moe_shared_experts_bias_mode=moe_shared_experts_bias_mode,
+                    moe_use_weighted_shared_experts=moe_use_weighted_shared_experts,
                 ) for i in range(num_layers)
             ])
             stateless_layers = None

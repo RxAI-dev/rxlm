@@ -336,11 +336,11 @@ class IterativeJointLMTrainer(JointLMTrainer):
                 self._train_on_collected_batches(
                     collected_batches,
                     optimizer,
-                    scaler,
                     scheduler,
                     accumulated_tokens,
                     base_batch_idx,
-                    batch_size
+                    batch_size,
+                    scaler=scaler,
                 )
                 base_batch_idx = batch_idx + 1
                 # Clear collected batches
@@ -355,11 +355,11 @@ class IterativeJointLMTrainer(JointLMTrainer):
             self._train_on_collected_batches(
                 collected_batches,
                 optimizer,
-                scaler,
                 scheduler,
                 accumulated_tokens,
                 base_batch_idx,
-                batch_size
+                batch_size,
+                scaler=scaler,
             )
 
         # Validation at the end of epoch
@@ -392,11 +392,11 @@ class IterativeJointLMTrainer(JointLMTrainer):
             self,
             collected_batches: list,
             optimizer: torch.optim.Optimizer,
-            scaler: torch.cuda.amp.GradScaler,
             scheduler: torch.optim.lr_scheduler.LRScheduler,
             accumulated_tokens: torch.Tensor,
             base_batch_idx: int,
-            batch_size: int
+            batch_size: int,
+            scaler: torch.cuda.amp.GradScaler = None
     ):
         start_time = None
         """Train on collected batches"""
@@ -424,7 +424,7 @@ class IterativeJointLMTrainer(JointLMTrainer):
                 self.accumulated_loss += loss
                 loss = loss / self.gradient_accumulation_steps
 
-                if self.use_amp:
+                if self.use_amp and scaler is not None:
                     scaler.scale(loss).backward()
                 else:
                     loss.backward()
@@ -432,10 +432,10 @@ class IterativeJointLMTrainer(JointLMTrainer):
                 self.optimizer_step_count += 1
                 if self.optimizer_step_count % self.gradient_accumulation_steps == 0:
                     # Clip gradients after accumulation
-                    if self.use_amp:
+                    if self.use_amp and scaler is not None:
                         scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0, error_if_nonfinite=False)
-                    if self.use_amp:
+                    if self.use_amp and scaler is not None:
                         scaler.step(optimizer)
                         scaler.update()
                     else:

@@ -5,11 +5,11 @@ import torch.nn as nn
 class FeedForward(nn.Module):
     """Basic Feed-forward layer with activation function and optional dropout"""
 
-    def __init__(self, embed_dim: int, hidden_dim: int, activation: nn.Module, dropout: float = 0.0, *args, **kwargs):
+    def __init__(self, embed_dim: int, hidden_dim: int, activation: nn.Module, dropout: float = 0.0, use_bias: bool = True, *args, **kwargs):
         super(FeedForward, self).__init__(*args, **kwargs)
-        self.fc1 = nn.Linear(embed_dim, hidden_dim)
+        self.fc1 = nn.Linear(embed_dim, hidden_dim, bias=use_bias)
         self.activation = activation
-        self.fc2 = nn.Linear(hidden_dim, embed_dim)
+        self.fc2 = nn.Linear(hidden_dim, embed_dim, bias=use_bias)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -22,9 +22,9 @@ class FeedForward(nn.Module):
 class GatedLinearUnit(nn.Module):
     """Gated linear unit layer with configurable activation (SwiGLU, ReGLU, etc.)"""
 
-    def __init__(self, embed_dim: int, hidden_dim: int, activation: nn.Module, *args, **kwargs):
+    def __init__(self, embed_dim: int, hidden_dim: int, activation: nn.Module, use_bias: bool = True, *args, **kwargs):
         super(GatedLinearUnit, self).__init__(*args, **kwargs)
-        self.linear = nn.Linear(embed_dim, hidden_dim * 2)
+        self.linear = nn.Linear(embed_dim, hidden_dim * 2, bias=use_bias)
         self.activation = activation
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -35,10 +35,10 @@ class GatedLinearUnit(nn.Module):
 class GatedFeedForward(nn.Module):
     """Gated feed-forward layer with activation function and optional dropout"""
 
-    def __init__(self, embed_dim: int, hidden_dim: int, activation: nn.Module, dropout: float = 0.0, *args, **kwargs):
+    def __init__(self, embed_dim: int, hidden_dim: int, activation: nn.Module, dropout: float = 0.0, use_bias: bool = True, *args, **kwargs):
         super(GatedFeedForward, self).__init__(*args, **kwargs)
-        self.fc1 = GatedLinearUnit(embed_dim, hidden_dim, activation)
-        self.fc2 = nn.Linear(hidden_dim, embed_dim)
+        self.fc1 = GatedLinearUnit(embed_dim, hidden_dim, activation, use_bias=use_bias)
+        self.fc2 = nn.Linear(hidden_dim, embed_dim, bias=use_bias)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

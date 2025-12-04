@@ -31,6 +31,10 @@ class ReactiveTransformerLayer(nn.Module):
             skip_memory_cross_attention: bool = False,
             router_amp: bool = False,
             router_dtype: torch.dtype = torch.float32,
+            moe_grouped_gemm: bool = True,
+            moe_bias_mode: Literal['global', 'local', 'off'] = 'global',
+            moe_shared_experts_bias_mode: Literal['global', 'local', 'off'] = 'local',
+            moe_use_weighted_shared_experts: bool = True,
             *args,
             **kwargs,
     ):
@@ -50,7 +54,10 @@ class ReactiveTransformerLayer(nn.Module):
                     self.ff = VectorizedGatedMoeFeedForward(
                         embed_dim, ff_dim, num_experts, ff_activation,
                         top_k=moe_top_k, dropout=ff_dropout, num_shared_experts=num_shared_experts,
-                        router_amp=router_amp, router_dtype=router_dtype, from_legacy=vectorized_moe_from_legacy
+                        router_amp=router_amp, router_dtype=router_dtype, from_legacy=vectorized_moe_from_legacy,
+                        use_grouped_gemm=moe_grouped_gemm, bias_mode=moe_bias_mode,
+                        shared_experts_bias_mode=moe_shared_experts_bias_mode,
+                        use_weighted_shared_experts=moe_use_weighted_shared_experts
                     )
                 else:
                     self.ff = GatedMoeFeedForward(
@@ -66,7 +73,10 @@ class ReactiveTransformerLayer(nn.Module):
                     self.ff = VectorizedMoeFeedForward(
                         embed_dim, ff_dim, num_experts, ff_activation,
                         top_k=moe_top_k, dropout=ff_dropout, num_shared_experts=num_shared_experts,
-                        router_amp=router_amp, router_dtype=router_dtype, from_legacy=vectorized_moe_from_legacy
+                        router_amp=router_amp, router_dtype=router_dtype, from_legacy=vectorized_moe_from_legacy,
+                        use_grouped_gemm=moe_grouped_gemm, bias_mode=moe_bias_mode,
+                        shared_experts_bias_mode=moe_shared_experts_bias_mode,
+                        use_weighted_shared_experts=moe_use_weighted_shared_experts
                     )
                 else:
                     self.ff = MoeFeedForward(
@@ -194,10 +204,14 @@ class ReactiveTransformerLayer(nn.Module):
             if profiler is not None:
                 profiler.profile_start('cross_attn')
             stm = self.stm_norm(stm)
-            mem_mask = mask.squeeze(1).unsqueeze(-1).expand(-1, -1, -1, stm.size(1)) \
-                if mask is not None else None
 
-            x = self.memory_cross_attention(x, stm, stm, mask=mem_mask, stm_kv_cache=stm_kv_cache, current_positions=current_positions)
+            if mask is not None:
+                padding_mask = mask.squeeze(1).squeeze(1)  # [B, seq_len]
+                x_masked = x * padding_mask.unsqueeze(-1)  # Zero out padded query positions
+            else:
+                x_masked = x
+
+            x = self.memory_cross_attention(x_masked, stm, stm, mask=None, stm_kv_cache=stm_kv_cache, current_positions=current_positions)
             x = residual + x
 
             if profiler is not None:

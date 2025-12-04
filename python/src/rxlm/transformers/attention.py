@@ -118,11 +118,14 @@ class MultiHeadAttention(nn.Module):
 
     def _flash_attention(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, b: int, t: int, d: int,
                          mask: torch.Tensor = None, enable_gqa: bool = False, generate_mode: bool = False):
-        # After ~6h of fighthing, PyTorch based is still now working so I decided to use FlashAttention directly
-        # with sdpa_kernel(backends=[SDPBackend.FLASH_ATTENTION]):
-        #     return self._torch_attention(q, k, v, b, t, d, mask=mask, enable_gqa=enable_gqa)
-        from flash_attn import flash_attn_func
-        attn_output = flash_attn_func(q, k, v, dropout_p=self.dropout.p if self.training else 0.0, causal=self.is_causal if not generate_mode else False)
+        with nn.attention.sdpa_kernel(nn.attention.SDPBackend.FLASH_ATTENTION):
+            attn_output = F.scaled_dot_product_attention(
+                q, k, v,
+                attn_mask=mask if not self.is_causal or generate_mode else None,
+                dropout_p=self.dropout.p if self.training else 0.0,
+                is_causal=self.is_causal if not generate_mode else False,
+                enable_gqa=enable_gqa,
+            )
         return self._transpose_output(attn_output, b, t, d)
 
     def _torch_attention(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, b: int, t: int, d: int,
@@ -134,6 +137,7 @@ class MultiHeadAttention(nn.Module):
             is_causal=self.is_causal if not generate_mode else False,
             enable_gqa=enable_gqa,
         )
+
         return self._transpose_output(attn_output, b, t, d)
 
     def _calculate_attention(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, b: int, t: int, d: int, mask: torch.Tensor = None, generate_mode: bool = False):

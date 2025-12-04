@@ -131,7 +131,7 @@ class BaseTrainer(ABC):
                 num_workers=self.num_dataloader_workers,
             )
 
-        scaler = torch.amp.GradScaler() if self.use_amp else None
+        scaler = torch.amp.GradScaler() if self.use_amp and self.dtype != torch.bfloat16 else None
 
         self.model.train()
         for epoch in range(self.current_epoch, self.current_epoch + epochs):
@@ -180,7 +180,7 @@ class BaseTrainer(ABC):
                 self.accumulated_loss += loss
                 loss = loss / self.gradient_accumulation_steps
 
-                if self.use_amp:
+                if self.use_amp and scaler is not None:
                     scaler.scale(loss).backward()
                 else:
                     loss.backward()
@@ -188,10 +188,10 @@ class BaseTrainer(ABC):
                 self.optimizer_step_count += 1
                 if self.optimizer_step_count % self.gradient_accumulation_steps == 0:
                     # Clip gradients after accumulation
-                    if self.use_amp:
+                    if self.use_amp and scaler is not None:
                         scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0, error_if_nonfinite=False)
-                    if self.use_amp:
+                    if self.use_amp and scaler is not None:
                         scaler.step(optimizer)
                         scaler.update()
                     else:

@@ -37,6 +37,7 @@ Use `from_legacy=True` and `load_weights_from_legacy()` to convert existing mode
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Literal
 
 from .ff import FeedForward, GatedFeedForward
 from ..training.utils import RxTModelProfiler
@@ -163,7 +164,6 @@ class MoeFeedForward(nn.Module):
         # selected_experts: [num_tokens, top_k]
         if profiler is not None:
             profiler.profile_start('moe_router')
-
 
         if self.router_amp:
             with torch.amp.autocast(device_type=x.device.type, dtype=self.router_dtype):
@@ -404,7 +404,10 @@ class VectorizedMoeFeedForward(nn.Module):
             router_amp: bool = False,
             router_dtype: torch.dtype = torch.float32,
             from_legacy: bool = False,
-            use_grouped_gemm: bool = False,
+            use_grouped_gemm: bool = True,
+            bias_mode: Literal['global', 'local', 'off'] = 'global',
+            shared_experts_bias_mode: Literal['global', 'local', 'off'] = 'local',
+            use_weighted_shared_experts: bool = True,
             *args,
             **kwargs
     ):
@@ -419,6 +422,10 @@ class VectorizedMoeFeedForward(nn.Module):
         self.activation = activation
         self.dropout_p = dropout
         self.use_grouped_gemm = use_grouped_gemm and GROUPED_GEMM_AVAILABLE
+        self.bias_mode = bias_mode
+        self.shared_experts_bias_mode = shared_experts_bias_mode
+        self.use_weighted_shared_experts = use_weighted_shared_experts
+        self.debug_step = 0
 
         # Warn if grouped_gemm requested but not available
         if use_grouped_gemm and not GROUPED_GEMM_AVAILABLE:
@@ -447,18 +454,27 @@ class VectorizedMoeFeedForward(nn.Module):
         # fc1: embed_dim -> hidden_dim, so weight is [hidden_dim, embed_dim]
         # For BMM we need [num_experts, embed_dim, hidden_dim] (transposed)
         self.w1 = nn.Parameter(torch.randn(self.num_experts, self.embed_dim, self.hidden_dim) * 0.02)
-        self.b1 = nn.Parameter(torch.zeros(self.num_experts, self.hidden_dim))
+
+        if self.bias_mode == 'local':
+            self.b1 = nn.Parameter(torch.zeros(self.num_experts, self.hidden_dim))
 
         # fc2: hidden_dim -> embed_dim, so weight is [embed_dim, hidden_dim]
         # For BMM we need [num_experts, hidden_dim, embed_dim] (transposed)
         self.w2 = nn.Parameter(torch.randn(self.num_experts, self.hidden_dim, self.embed_dim) * 0.02)
-        self.b2 = nn.Parameter(torch.zeros(self.num_experts, self.embed_dim))
+        if self.bias_mode == 'local':
+            self.b2 = nn.Parameter(torch.zeros(self.num_experts, self.embed_dim))
+
+        if self.bias_mode == 'global':
+            self.global_bias = nn.Parameter(torch.zeros(self.embed_dim))
+
+        if self.shared_experts_bias_mode == 'global':
+            self.shared_experts_bias = nn.Parameter(torch.zeros(self.embed_dim))
 
     def _init_legacy_experts(self, from_legacy: bool):
         """Initialize legacy ModuleList experts if from_legacy=True."""
         if from_legacy:
             self.experts = nn.ModuleList([
-                FeedForward(self.embed_dim, self.hidden_dim, self.activation, self.dropout_p)
+                FeedForward(self.embed_dim, self.hidden_dim, self.activation, self.dropout_p, use_bias=self.bias_mode == 'local')
                 for _ in range(self.num_experts)
             ])
         else:
@@ -468,7 +484,7 @@ class VectorizedMoeFeedForward(nn.Module):
         """Initialize shared experts (always as ModuleList)."""
         if self.num_shared_experts > 0:
             self.shared_experts = nn.ModuleList([
-                FeedForward(self.embed_dim, self.hidden_dim, self.activation, self.dropout_p)
+                FeedForward(self.embed_dim, self.hidden_dim, self.activation, self.dropout_p, use_bias=self.shared_experts_bias_mode == 'local')
                 for _ in range(self.num_shared_experts)
             ])
 
@@ -484,10 +500,12 @@ class VectorizedMoeFeedForward(nn.Module):
             # Stack weights from legacy experts into new parameters
             # fc1.weight is [hidden_dim, embed_dim], we transpose to [embed_dim, hidden_dim]
             self.w1.copy_(torch.stack([e.fc1.weight.T for e in self.experts], dim=0))
-            self.b1.copy_(torch.stack([e.fc1.bias for e in self.experts], dim=0))
+            if self.bias_mode == 'local':
+                self.b1.copy_(torch.stack([e.fc1.bias for e in self.experts], dim=0))
             # fc2.weight is [embed_dim, hidden_dim], we transpose to [hidden_dim, embed_dim]
             self.w2.copy_(torch.stack([e.fc2.weight.T for e in self.experts], dim=0))
-            self.b2.copy_(torch.stack([e.fc2.bias for e in self.experts], dim=0))
+            if self.bias_mode == 'local':
+                self.b2.copy_(torch.stack([e.fc2.bias for e in self.experts], dim=0))
 
         # Free legacy memory
         del self.experts
@@ -509,7 +527,8 @@ class VectorizedMoeFeedForward(nn.Module):
         """
         # First linear layer: [E, T, D] @ [E, D, H] -> [E, T, H]
         hidden = torch.bmm(padded_input, self.w1)  # [num_experts, max_tokens, hidden_dim]
-        hidden = hidden + self.b1.unsqueeze(1)  # Add bias
+        if self.bias_mode == 'local':
+            hidden = hidden + self.b1.unsqueeze(1)  # Add bias
 
         # Activation
         hidden = self.activation(hidden)
@@ -520,7 +539,8 @@ class VectorizedMoeFeedForward(nn.Module):
 
         # Second linear layer: [E, T, H] @ [E, H, D] -> [E, T, D]
         output = torch.bmm(hidden, self.w2)  # [num_experts, max_tokens, embed_dim]
-        output = output + self.b2.unsqueeze(1)  # Add bias
+        if self.bias_mode == 'local':
+            output = output + self.b2.unsqueeze(1)  # Add bias
 
         return output
 
@@ -569,8 +589,9 @@ class VectorizedMoeFeedForward(nn.Module):
         # - With trans_b=False, gmm does: input @ weight per expert
 
         # FC1: [total_tokens, embed_dim] @ [E, embed_dim, hidden_dim] -> [total_tokens, hidden_dim]
-        hidden = gg.ops.gmm(dispatched_x, self.w1, tokens_per_expert, trans_b=False)
-        hidden = hidden + self._expand_bias(self.b1, tokens_per_expert)
+        hidden = gg.ops.gmm(dispatched_x.to(dtype=torch.bfloat16), self.w1.to(dtype=torch.bfloat16), tokens_per_expert, trans_b=False)
+        if self.bias_mode == 'local':
+            hidden = hidden + self._expand_bias(self.b1, tokens_per_expert)
         hidden = self.activation(hidden)
 
         # Dropout
@@ -579,7 +600,8 @@ class VectorizedMoeFeedForward(nn.Module):
 
         # FC2: [total_tokens, hidden_dim] @ [E, hidden_dim, embed_dim] -> [total_tokens, embed_dim]
         output = gg.ops.gmm(hidden, self.w2, tokens_per_expert, trans_b=False)
-        output = output + self._expand_bias(self.b2, tokens_per_expert)
+        if self.bias_mode == 'local':
+            output = output + self._expand_bias(self.b2, tokens_per_expert)
 
         return output
 
@@ -654,16 +676,23 @@ class VectorizedMoeFeedForward(nn.Module):
         # Select weights and biases for active experts using advanced indexing
         # [num_experts, embed_dim, hidden_dim] -> [top_k, embed_dim, hidden_dim]
         w1_selected = self.w1[selected_experts]  # [top_k, embed_dim, hidden_dim]
-        b1_selected = self.b1[selected_experts]  # [top_k, hidden_dim]
+        if self.bias_mode == 'local':
+            b1_selected = self.b1[selected_experts]  # [top_k, hidden_dim]
+        else:
+            b1_selected = None
         w2_selected = self.w2[selected_experts]  # [top_k, hidden_dim, embed_dim]
-        b2_selected = self.b2[selected_experts]  # [top_k, embed_dim]
+        if self.bias_mode == 'local':
+            b2_selected = self.b2[selected_experts]  # [top_k, embed_dim]
+        else:
+            b2_selected = None
 
         # Expand single token for batched computation: [1, embed_dim] -> [top_k, 1, embed_dim]
         x_expanded = x.unsqueeze(0).expand(self.top_k, -1, -1)  # [top_k, 1, embed_dim]
 
         # First linear layer: [top_k, 1, D] @ [top_k, D, H] -> [top_k, 1, H]
         hidden = torch.bmm(x_expanded, w1_selected)  # [top_k, 1, hidden_dim]
-        hidden = hidden + b1_selected.unsqueeze(1)  # Add bias
+        if self.bias_mode == 'local':
+            hidden = hidden + b1_selected.unsqueeze(1)  # Add bias
 
         # Activation
         hidden = self.activation(hidden)
@@ -674,7 +703,11 @@ class VectorizedMoeFeedForward(nn.Module):
 
         # Second linear layer: [top_k, 1, H] @ [top_k, H, D] -> [top_k, 1, D]
         expert_outputs = torch.bmm(hidden, w2_selected)  # [top_k, 1, embed_dim]
-        expert_outputs = expert_outputs + b2_selected.unsqueeze(1)  # Add bias
+        if self.bias_mode == 'local':
+            expert_outputs = expert_outputs + b2_selected.unsqueeze(1)  # Add bias
+
+        if self.use_weighted_shared_experts:
+            routing_weights = routing_weights * (self.top_k / (self.top_k + 1))
 
         # Apply routing weights: [top_k, 1, embed_dim] * [top_k, 1, 1] -> [top_k, 1, embed_dim]
         weighted_outputs = expert_outputs * routing_weights.view(-1, 1, 1)
@@ -704,7 +737,6 @@ class VectorizedMoeFeedForward(nn.Module):
         else:
             routing_weights, selected_experts = self.router(x)
 
-
         if profiler is not None:
             profiler.profile_end('moe_router')
 
@@ -723,7 +755,6 @@ class VectorizedMoeFeedForward(nn.Module):
             final_output = self._single_token_expert_forward(
                 x, selected_experts[0], routing_weights[0]
             )
-
 
             if profiler is not None:
                 profiler.profile_end('moe_loop')
@@ -746,23 +777,28 @@ class VectorizedMoeFeedForward(nn.Module):
             # === STEP 4: VECTORIZED EXPERT PROCESSING ===
             tokens_per_expert = F.one_hot(sorted_expert_indices, num_classes=self.num_experts).sum(dim=0)
 
-            # Compute start indices for each expert
-            starts = torch.zeros(self.num_experts, dtype=torch.long, device=x.device)
-            starts[1:] = tokens_per_expert[:-1].cumsum(0)
-
-
-            if profiler is not None:
-                profiler.profile_end('moe_permute')
-
-            if profiler is not None:
-                profiler.profile_start('moe_loop')
-
             # Vectorized expert forward pass - use grouped_gemm if enabled
             if self.use_grouped_gemm:
+                if profiler is not None:
+                    profiler.profile_end('moe_permute')
+
+                if profiler is not None:
+                    profiler.profile_start('moe_loop')
+
                 concatenated_outputs = self._grouped_gemm_expert_forward(
                     dispatched_x, tokens_per_expert
                 )
             else:
+                # Compute start indices for each expert
+                starts = torch.zeros(self.num_experts, dtype=torch.long, device=x.device)
+                starts[1:] = tokens_per_expert[:-1].cumsum(0)
+
+                if profiler is not None:
+                    profiler.profile_end('moe_permute')
+
+                if profiler is not None:
+                    profiler.profile_start('moe_loop')
+
                 concatenated_outputs = self._vectorized_expert_forward(
                     dispatched_x, sorted_expert_indices, tokens_per_expert, starts
                 )
@@ -774,7 +810,11 @@ class VectorizedMoeFeedForward(nn.Module):
                 profiler.profile_start('moe_reverse')
 
             # === STEP 5: REVERSE PERMUTATION AND COMBINE RESULTS ===
+            if self.use_weighted_shared_experts:
+                permuted_routing_weights = permuted_routing_weights * (self.top_k / (self.top_k + 1))
+
             weighted_outputs = concatenated_outputs * permuted_routing_weights.unsqueeze(1)
+
             final_output = torch.zeros_like(x)
             inverse_sorted_order = sorted_order.argsort(0)
             unpermuted_outputs = weighted_outputs[inverse_sorted_order]
@@ -787,11 +827,13 @@ class VectorizedMoeFeedForward(nn.Module):
         if profiler is not None:
             profiler.profile_start('moe_shared')
 
+        if self.bias_mode == 'global':
+            final_output = final_output + self.global_bias.unsqueeze(0)
+
         # Add shared expert outputs (if any) - keep same as original
         if self.num_shared_experts > 0:
             if self.num_shared_experts == 1:
-                shared_output = self.shared_experts[0](x)
-                final_output = final_output + shared_output
+                shared_combined = self.shared_experts[0](x)
             else:
                 shared_gate_logits = self.shared_expert_gate(x)
                 shared_weights = F.softmax(shared_gate_logits, dim=-1)
@@ -799,7 +841,15 @@ class VectorizedMoeFeedForward(nn.Module):
                     expert(x) for expert in self.shared_experts
                 ], dim=1)
                 shared_combined = (shared_outputs * shared_weights.unsqueeze(-1)).sum(dim=1)
-                final_output = final_output + shared_combined
+
+            if self.shared_experts_bias_mode == 'global':
+                shared_combined = shared_combined + self.shared_experts_bias.unsqueeze(0)
+
+            if self.use_weighted_shared_experts:
+                weights_modifier = 1 / (self.top_k + 1)
+                shared_combined = shared_combined * weights_modifier
+
+            final_output = final_output + shared_combined
 
         if profiler is not None:
             profiler.profile_end('moe_shared')
@@ -814,19 +864,55 @@ class VectorizedGatedMoeFeedForward(VectorizedMoeFeedForward):
         """Initialize stacked expert weights for gated feedforward."""
         # fc1 (GatedLinearUnit): embed_dim -> hidden_dim * 2, so weight is [hidden_dim * 2, embed_dim]
         # For BMM we need [num_experts, embed_dim, hidden_dim * 2] (transposed)
-        self.w1 = nn.Parameter(torch.randn(self.num_experts, self.embed_dim, self.hidden_dim * 2) * 0.02)
-        self.b1 = nn.Parameter(torch.zeros(self.num_experts, self.hidden_dim * 2))
+        w1 = torch.randn(self.num_experts, self.embed_dim, self.hidden_dim * 2) * 0.02
+        if self.bias_mode == 'local':
+            b1 = torch.zeros(self.num_experts, self.hidden_dim * 2)
+        else:
+            b1 = None
 
         # fc2: hidden_dim -> embed_dim, so weight is [embed_dim, hidden_dim]
         # For BMM we need [num_experts, hidden_dim, embed_dim] (transposed)
-        self.w2 = nn.Parameter(torch.randn(self.num_experts, self.hidden_dim, self.embed_dim) * 0.02)
-        self.b2 = nn.Parameter(torch.zeros(self.num_experts, self.embed_dim))
+        w2 = torch.randn(self.num_experts, self.hidden_dim, self.embed_dim) * 0.02
+        if self.bias_mode == 'local':
+            b2 = torch.zeros(self.num_experts, self.embed_dim)
+        else:
+            b2 = None
+
+        if self.use_grouped_gemm:
+            self.w1 = nn.Parameter(w1.to(dtype=torch.bfloat16))
+            if self.bias_mode == 'local':
+                self.b1 = nn.Parameter(b1.to(dtype=torch.bfloat16))
+            self.w2 = nn.Parameter(w2.to(dtype=torch.bfloat16))
+            if self.bias_mode == 'local':
+                self.b2 = nn.Parameter(b2.to(dtype=torch.bfloat16))
+        else:
+            self.w1 = nn.Parameter(w1)
+            if self.bias_mode == 'local':
+                self.b1 = nn.Parameter(b1)
+            self.w2 = nn.Parameter(w2)
+            if self.bias_mode == 'local':
+                self.b2 = nn.Parameter(b2)
+
+        if self.bias_mode == 'global':
+            gb = torch.zeros(self.embed_dim)
+            # if self.use_grouped_gemm:
+            #     self.global_bias = nn.Parameter(gb.to(dtype=torch.bfloat16))
+            # else:
+            self.global_bias = nn.Parameter(gb)
+
+        if self.shared_experts_bias_mode == 'global':
+            sb = torch.zeros(self.embed_dim)
+            if self.use_grouped_gemm:
+                self.shared_experts_bias = nn.Parameter(sb.to(dtype=torch.bfloat16))
+            else:
+                self.shared_experts_bias = nn.Parameter(sb)
+
 
     def _init_legacy_experts(self, from_legacy: bool):
         """Initialize legacy ModuleList experts with GatedFeedForward."""
         if from_legacy:
             self.experts = nn.ModuleList([
-                GatedFeedForward(self.embed_dim, self.hidden_dim, self.activation, self.dropout_p)
+                GatedFeedForward(self.embed_dim, self.hidden_dim, self.activation, self.dropout_p, use_bias=self.bias_mode == 'local')
                 for _ in range(self.num_experts)
             ])
         else:
@@ -836,7 +922,7 @@ class VectorizedGatedMoeFeedForward(VectorizedMoeFeedForward):
         """Initialize shared experts with GatedFeedForward."""
         if self.num_shared_experts > 0:
             self.shared_experts = nn.ModuleList([
-                GatedFeedForward(self.embed_dim, self.hidden_dim, self.activation, self.dropout_p)
+                GatedFeedForward(self.embed_dim, self.hidden_dim, self.activation, self.dropout_p, use_bias=self.shared_experts_bias_mode == 'local')
                 for _ in range(self.num_shared_experts)
             ])
 
@@ -852,10 +938,12 @@ class VectorizedGatedMoeFeedForward(VectorizedMoeFeedForward):
             # Stack weights from legacy gated experts into new parameters
             # fc1.linear.weight is [hidden_dim * 2, embed_dim], we transpose to [embed_dim, hidden_dim * 2]
             self.w1.copy_(torch.stack([e.fc1.linear.weight.T for e in self.experts], dim=0))
-            self.b1.copy_(torch.stack([e.fc1.linear.bias for e in self.experts], dim=0))
+            if self.bias_mode == 'global':
+                self.b1.copy_(torch.stack([e.fc1.linear.bias for e in self.experts], dim=0))
             # fc2.weight is [embed_dim, hidden_dim], we transpose to [hidden_dim, embed_dim]
             self.w2.copy_(torch.stack([e.fc2.weight.T for e in self.experts], dim=0))
-            self.b2.copy_(torch.stack([e.fc2.bias for e in self.experts], dim=0))
+            if self.bias_mode == 'global':
+                self.b2.copy_(torch.stack([e.fc2.bias for e in self.experts], dim=0))
 
         # Free legacy memory
         del self.experts
@@ -874,7 +962,8 @@ class VectorizedGatedMoeFeedForward(VectorizedMoeFeedForward):
         """
         # First linear layer (GatedLinearUnit): [E, T, D] @ [E, D, 2H] -> [E, T, 2H]
         gated_hidden = torch.bmm(padded_input, self.w1)  # [num_experts, max_tokens, hidden_dim * 2]
-        gated_hidden = gated_hidden + self.b1.unsqueeze(1)  # Add bias
+        if self.bias_mode == 'local':
+            gated_hidden = gated_hidden + self.b1.unsqueeze(1)  # Add bias
 
         # Split into linear and gate components
         l, g = gated_hidden.chunk(2, dim=-1)  # Each: [num_experts, max_tokens, hidden_dim]
@@ -888,7 +977,8 @@ class VectorizedGatedMoeFeedForward(VectorizedMoeFeedForward):
 
         # Second linear layer: [E, T, H] @ [E, H, D] -> [E, T, D]
         output = torch.bmm(hidden, self.w2)  # [num_experts, max_tokens, embed_dim]
-        output = output + self.b2.unsqueeze(1)  # Add bias
+        if self.bias_mode == 'local':
+            output = output + self.b2.unsqueeze(1)  # Add bias
 
         return output
 
@@ -907,9 +997,12 @@ class VectorizedGatedMoeFeedForward(VectorizedMoeFeedForward):
         Returns:
             [total_tokens, embed_dim] - expert outputs in same order as dispatched_x
         """
+        x_bf16 = dispatched_x.to(dtype=torch.bfloat16)
+
         # FC1 (Gated): [total_tokens, embed_dim] @ [E, embed_dim, hidden_dim * 2] -> [total_tokens, hidden_dim * 2]
-        gated_hidden = gg.ops.gmm(dispatched_x, self.w1, tokens_per_expert, trans_b=False)
-        gated_hidden = gated_hidden + self._expand_bias(self.b1, tokens_per_expert)
+        gated_hidden = gg.ops.gmm(x_bf16, self.w1, tokens_per_expert, trans_b=False)
+        if self.bias_mode == 'local':
+            gated_hidden = gated_hidden + self._expand_bias(self.b1, tokens_per_expert)
 
         # Split into linear and gate components
         l, g = gated_hidden.chunk(2, dim=-1)  # Each: [total_tokens, hidden_dim]
@@ -923,9 +1016,10 @@ class VectorizedGatedMoeFeedForward(VectorizedMoeFeedForward):
 
         # FC2: [total_tokens, hidden_dim] @ [E, hidden_dim, embed_dim] -> [total_tokens, embed_dim]
         output = gg.ops.gmm(hidden, self.w2, tokens_per_expert, trans_b=False)
-        output = output + self._expand_bias(self.b2, tokens_per_expert)
+        if self.bias_mode == 'local':
+            output = output + self._expand_bias(self.b2, tokens_per_expert)
 
-        return output
+        return output.to(dtype=dispatched_x.dtype)
 
     def _single_token_expert_forward(
         self,
@@ -945,17 +1039,24 @@ class VectorizedGatedMoeFeedForward(VectorizedMoeFeedForward):
             output: [1, embed_dim] - weighted sum of expert outputs
         """
         # Select weights and biases for active experts using advanced indexing
-        w1_selected = self.w1[selected_experts]  # [top_k, embed_dim, hidden_dim * 2]
-        b1_selected = self.b1[selected_experts]  # [top_k, hidden_dim * 2]
+        w1_selected = self.w1[selected_experts]  # [top_k, embed_dim, hidden_dim]
+        if self.bias_mode == 'local':
+            b1_selected = self.b1[selected_experts]  # [top_k, hidden_dim]
+        else:
+            b1_selected = None
         w2_selected = self.w2[selected_experts]  # [top_k, hidden_dim, embed_dim]
-        b2_selected = self.b2[selected_experts]  # [top_k, embed_dim]
+        if self.bias_mode == 'local':
+            b2_selected = self.b2[selected_experts]  # [top_k, embed_dim]
+        else:
+            b2_selected = None
 
         # Expand single token for batched computation: [1, embed_dim] -> [top_k, 1, embed_dim]
         x_expanded = x.unsqueeze(0).expand(self.top_k, -1, -1)  # [top_k, 1, embed_dim]
 
         # First linear layer (GatedLinearUnit): [top_k, 1, D] @ [top_k, D, 2H] -> [top_k, 1, 2H]
         gated_hidden = torch.bmm(x_expanded, w1_selected)  # [top_k, 1, hidden_dim * 2]
-        gated_hidden = gated_hidden + b1_selected.unsqueeze(1)  # Add bias
+        if self.bias_mode == 'local':
+            gated_hidden = gated_hidden + b1_selected.unsqueeze(1)  # Add bias
 
         # Split into linear and gate components
         l, g = gated_hidden.chunk(2, dim=-1)  # Each: [top_k, 1, hidden_dim]
@@ -969,7 +1070,11 @@ class VectorizedGatedMoeFeedForward(VectorizedMoeFeedForward):
 
         # Second linear layer: [top_k, 1, H] @ [top_k, H, D] -> [top_k, 1, D]
         expert_outputs = torch.bmm(hidden, w2_selected)  # [top_k, 1, embed_dim]
-        expert_outputs = expert_outputs + b2_selected.unsqueeze(1)  # Add bias
+        if self.bias_mode == 'local':
+            expert_outputs = expert_outputs + b2_selected.unsqueeze(1)  # Add bias
+
+        if self.use_weighted_shared_experts:
+            routing_weights = routing_weights * (self.top_k / (self.top_k + 1))
 
         # Apply routing weights: [top_k, 1, embed_dim] * [top_k, 1, 1] -> [top_k, 1, embed_dim]
         weighted_outputs = expert_outputs * routing_weights.view(-1, 1, 1)
