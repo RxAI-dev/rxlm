@@ -179,6 +179,13 @@ class ReactiveTransformerLayer(nn.Module):
 
         if profiler is not None:
             profiler.profile_start('self_attn')
+
+        if self.skip_memory_cross_attention and self.attention.use_flash_attention and not self.attention.is_causal:
+            if mask is not None:
+                padding_mask = mask.squeeze(1).squeeze(1)  # [B, seq_len]
+                x = x * padding_mask.unsqueeze(-1)  # Zero out padded query positions
+                mask = None
+
         x = self.attention(x, x, x, mask=mask, use_self_attn_cache=use_self_attn_cache,
                              current_positions=current_positions)
         x = residual + x
