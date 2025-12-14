@@ -40,7 +40,6 @@ import torch.nn.functional as F
 from typing import Literal
 
 from .ff import FeedForward, GatedFeedForward
-from ..training.utils import RxTModelProfiler
 
 # Try to import grouped_gemm - optional dependency
 try:
@@ -151,7 +150,7 @@ class MoeFeedForward(nn.Module):
     def router_loss(self):
         return self.router.aux_loss
 
-    def forward(self, x: torch.Tensor, profiler: RxTModelProfiler = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Store original shape for final step
         orig_shape = x.size()
         # Flatten input sequence
@@ -162,30 +161,15 @@ class MoeFeedForward(nn.Module):
         # Get routing weights and selected experts from router
         # routing_weights: [num_tokens, top_k]
         # selected_experts: [num_tokens, top_k]
-        if profiler is not None:
-            profiler.profile_start('moe_router')
-
         if self.router_amp:
             with torch.amp.autocast(device_type=x.device.type, dtype=self.router_dtype):
                 routing_weights, selected_experts = self.router(x)
         else:
             routing_weights, selected_experts = self.router(x)
 
-        if profiler is not None:
-            profiler.profile_end('moe_router')
-
-        if profiler is not None:
-            profiler.profile_start('moe_permute')
-
         # CHANGED: Fast path for single-token processing (autoregressive generation)
         # When processing one token at a time, avoid complex permutation overhead
         if num_tokens == 1:
-            if profiler is not None:
-                profiler.profile_end('moe_permute')
-
-            if profiler is not None:
-                profiler.profile_start('moe_loop')
-
             # Simple loop over top-k experts for single token
             final_output = torch.zeros_like(x)
             for k in range(self.top_k):
@@ -193,13 +177,6 @@ class MoeFeedForward(nn.Module):
                 weight = routing_weights[0, k]
                 expert_output = self.experts[expert_idx](x)
                 final_output += weight * expert_output
-
-            if profiler is not None:
-                profiler.profile_end('moe_loop')
-
-            if profiler is not None:
-                profiler.profile_start('moe_reverse')
-                profiler.profile_end('moe_reverse')
         else:
             # CHANGED: Original batched processing path for multi-token sequences (prompt phase)
             # === STEP 2: CREATE DISPOSE MAP ===
@@ -224,12 +201,6 @@ class MoeFeedForward(nn.Module):
             # Calculate number of tokens per expert
             tokens_per_expert = F.one_hot(sorted_expert_indices, num_classes=self.num_experts).sum(dim=0)
 
-            if profiler is not None:
-                profiler.profile_end('moe_permute')
-
-            if profiler is not None:
-                profiler.profile_start('moe_loop')
-
             # Create expert outputs list and start token idx (from 0)
             expert_outputs = []
             start_idx = 0
@@ -246,12 +217,6 @@ class MoeFeedForward(nn.Module):
                 expert_output = self.experts[i](expert_input)
                 expert_outputs.append(expert_output)
                 start_idx = end_idx
-
-            if profiler is not None:
-                profiler.profile_end('moe_loop')
-
-            if profiler is not None:
-                profiler.profile_start('moe_reverse')
 
             # Concatenate expert results
             concatenated_outputs = torch.cat(expert_outputs, dim=0)
@@ -275,12 +240,6 @@ class MoeFeedForward(nn.Module):
             # Allocate results in final tensor with scatter add
             final_output.scatter_add_(0, scatter_indices, unpermuted_outputs.to(dtype=final_output.dtype))
 
-            if profiler is not None:
-                profiler.profile_end('moe_reverse')
-
-        if profiler is not None:
-            profiler.profile_start('moe_shared')
-
         # CHANGED: Add shared expert outputs (if any)
         # Shared experts are applied to all tokens without routing
         if self.num_shared_experts > 0:
@@ -302,9 +261,6 @@ class MoeFeedForward(nn.Module):
                 # Apply weighted mean
                 shared_combined = (shared_outputs * shared_weights.unsqueeze(-1)).sum(dim=1)  # [num_tokens, embed_dim]
                 final_output = final_output + shared_combined
-
-        if profiler is not None:
-            profiler.profile_end('moe_shared')
 
         # Get final output to initial shape
         return final_output.view(orig_shape)
@@ -407,7 +363,7 @@ class VectorizedMoeFeedForward(nn.Module):
             use_grouped_gemm: bool = True,
             bias_mode: Literal['global', 'local', 'off'] = 'global',
             shared_experts_bias_mode: Literal['global', 'local', 'off'] = 'local',
-            use_weighted_shared_experts: bool = True,
+            use_weighted_shared_experts: bool = False,
             *args,
             **kwargs
     ):
@@ -490,6 +446,8 @@ class VectorizedMoeFeedForward(nn.Module):
 
             if self.num_shared_experts > 1:
                 self.shared_expert_gate = nn.Linear(self.embed_dim, self.num_shared_experts, bias=False)
+                # For shared expert gate load balancing
+                self.register_buffer('shared_gate_loss', torch.tensor(0.0), persistent=False)
 
     def load_weights_from_legacy(self):
         """Transfer weights from legacy ModuleList experts to stacked tensors, then free legacy memory."""
@@ -513,6 +471,8 @@ class VectorizedMoeFeedForward(nn.Module):
         torch.cuda.empty_cache()
 
     def router_loss(self):
+        if self.num_shared_experts > 1:
+            return self.router.aux_loss + self.shared_gate_loss
         return self.router.aux_loss
 
     def _apply_expert_weights(self, padded_input: torch.Tensor) -> torch.Tensor:
@@ -717,7 +677,7 @@ class VectorizedMoeFeedForward(nn.Module):
 
         return final_output
 
-    def forward(self, x: torch.Tensor, profiler: RxTModelProfiler = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Store original shape for final step
         orig_shape = x.size()
         # Flatten input sequence
@@ -728,40 +688,18 @@ class VectorizedMoeFeedForward(nn.Module):
         # Get routing weights and selected experts from router
         # routing_weights: [num_tokens, top_k]
         # selected_experts: [num_tokens, top_k]
-        if profiler is not None:
-            profiler.profile_start('moe_router')
-
         if self.router_amp:
             with torch.amp.autocast(device_type=x.device.type, dtype=self.router_dtype):
                 routing_weights, selected_experts = self.router(x)
         else:
             routing_weights, selected_experts = self.router(x)
 
-        if profiler is not None:
-            profiler.profile_end('moe_router')
-
-        if profiler is not None:
-            profiler.profile_start('moe_permute')
-
         # Fast path for single-token processing (autoregressive generation)
         if num_tokens == 1:
-            if profiler is not None:
-                profiler.profile_end('moe_permute')
-
-            if profiler is not None:
-                profiler.profile_start('moe_loop')
-
             # Vectorized computation for all top-k experts - no Python loop!
             final_output = self._single_token_expert_forward(
                 x, selected_experts[0], routing_weights[0]
             )
-
-            if profiler is not None:
-                profiler.profile_end('moe_loop')
-
-            if profiler is not None:
-                profiler.profile_start('moe_reverse')
-                profiler.profile_end('moe_reverse')
         else:
             # === STEP 2: CREATE DISPOSE MAP ===
             flat_selected_experts = selected_experts.view(-1)
@@ -779,12 +717,6 @@ class VectorizedMoeFeedForward(nn.Module):
 
             # Vectorized expert forward pass - use grouped_gemm if enabled
             if self.use_grouped_gemm:
-                if profiler is not None:
-                    profiler.profile_end('moe_permute')
-
-                if profiler is not None:
-                    profiler.profile_start('moe_loop')
-
                 concatenated_outputs = self._grouped_gemm_expert_forward(
                     dispatched_x, tokens_per_expert
                 )
@@ -793,21 +725,9 @@ class VectorizedMoeFeedForward(nn.Module):
                 starts = torch.zeros(self.num_experts, dtype=torch.long, device=x.device)
                 starts[1:] = tokens_per_expert[:-1].cumsum(0)
 
-                if profiler is not None:
-                    profiler.profile_end('moe_permute')
-
-                if profiler is not None:
-                    profiler.profile_start('moe_loop')
-
                 concatenated_outputs = self._vectorized_expert_forward(
                     dispatched_x, sorted_expert_indices, tokens_per_expert, starts
                 )
-
-            if profiler is not None:
-                profiler.profile_end('moe_loop')
-
-            if profiler is not None:
-                profiler.profile_start('moe_reverse')
 
             # === STEP 5: REVERSE PERMUTATION AND COMBINE RESULTS ===
             if self.use_weighted_shared_experts:
@@ -821,12 +741,6 @@ class VectorizedMoeFeedForward(nn.Module):
             scatter_indices = token_indices.unsqueeze(1).expand(-1, embed_dim)
             final_output.scatter_add_(0, scatter_indices, unpermuted_outputs.to(dtype=final_output.dtype))
 
-            if profiler is not None:
-                profiler.profile_end('moe_reverse')
-
-        if profiler is not None:
-            profiler.profile_start('moe_shared')
-
         if self.bias_mode == 'global':
             final_output = final_output + self.global_bias.unsqueeze(0)
 
@@ -837,6 +751,10 @@ class VectorizedMoeFeedForward(nn.Module):
             else:
                 shared_gate_logits = self.shared_expert_gate(x)
                 shared_weights = F.softmax(shared_gate_logits, dim=-1)
+
+                if self.training:
+                    self.shared_gate_loss = torch.abs(shared_weights - (1 / self.num_shared_experts)).mean()
+
                 shared_outputs = torch.stack([
                     expert(x) for expert in self.shared_experts
                 ], dim=1)
@@ -850,9 +768,6 @@ class VectorizedMoeFeedForward(nn.Module):
                 shared_combined = shared_combined * weights_modifier
 
             final_output = final_output + shared_combined
-
-        if profiler is not None:
-            profiler.profile_end('moe_shared')
 
         return final_output.view(orig_shape)
 

@@ -4,7 +4,6 @@ from typing import Literal, Optional
 from .attention import MultiHeadAttention, LinearAttention
 from .ff import FeedForward, GatedFeedForward
 from .moe import MoeFeedForward, GatedMoeFeedForward, VectorizedMoeFeedForward, VectorizedGatedMoeFeedForward
-from ..training.utils import RxTModelProfiler
 
 
 class ReactiveTransformerLayer(nn.Module):
@@ -34,7 +33,7 @@ class ReactiveTransformerLayer(nn.Module):
             moe_grouped_gemm: bool = True,
             moe_bias_mode: Literal['global', 'local', 'off'] = 'global',
             moe_shared_experts_bias_mode: Literal['global', 'local', 'off'] = 'local',
-            moe_use_weighted_shared_experts: bool = True,
+            moe_use_weighted_shared_experts: bool = False,
             *args,
             **kwargs,
     ):
@@ -167,18 +166,11 @@ class ReactiveTransformerLayer(nn.Module):
         else:
             return None
 
-    def forward(self, x: torch.Tensor, stm: torch.Tensor = None, mask: torch.Tensor = None, stm_kv_cache: tuple[torch.Tensor, torch.Tensor] = None, use_self_attn_cache: bool = False, current_positions: torch.Tensor = None, profiler: RxTModelProfiler = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, stm: torch.Tensor = None, mask: torch.Tensor = None, stm_kv_cache: tuple[torch.Tensor, torch.Tensor] = None, use_self_attn_cache: bool = False, current_positions: torch.Tensor = None) -> torch.Tensor:
         # First step, self-attention
-        if profiler is not None:
-            profiler.profile_start('norm1')
         residual = x
         if not self.use_post_norm:
             x = self.norm1(x)
-        if profiler is not None:
-            profiler.profile_end('norm1')
-
-        if profiler is not None:
-            profiler.profile_start('self_attn')
 
         if self.skip_memory_cross_attention and self.attention.use_flash_attention and not self.attention.is_causal:
             if mask is not None:
@@ -190,26 +182,16 @@ class ReactiveTransformerLayer(nn.Module):
                              current_positions=current_positions)
         x = residual + x
 
-        if profiler is not None:
-            profiler.profile_end('self_attn')
-
         if self.use_post_norm:
             x = self.norm1(x)
 
         # Second step, Memory cross-attention
         if not self.skip_memory_cross_attention and stm is not None:
-            if profiler is not None:
-                profiler.profile_start('norm2')
             residual = x
             if not self.use_post_norm:
                 x = self.norm2(x)
 
-            if profiler is not None:
-                profiler.profile_end('norm2')
-
             # normalize STM and prepare STM mask
-            if profiler is not None:
-                profiler.profile_start('cross_attn')
             stm = self.stm_norm(stm)
 
             if mask is not None:
@@ -221,32 +203,16 @@ class ReactiveTransformerLayer(nn.Module):
             x = self.memory_cross_attention(x_masked, stm, stm, mask=None, stm_kv_cache=stm_kv_cache, current_positions=current_positions)
             x = residual + x
 
-            if profiler is not None:
-                profiler.profile_end('cross_attn')
-
             if self.use_post_norm:
                 x = self.norm2(x)
 
         # Third step, Feed Forward network
-        if profiler is not None:
-            profiler.profile_start('norm3')
         residual = x
         if not self.use_post_norm:
             x = self.norm3(x)
-        if profiler is not None:
-            profiler.profile_end('norm3')
 
-
-        if profiler is not None:
-            profiler.profile_start('ff' if not self.use_moe else 'moe')
-        if self.use_moe:
-            x = self.ff(x, profiler=profiler)
-        else:
-            x = self.ff(x)
+        x = self.ff(x)
         x = residual + x
-
-        if profiler is not None:
-            profiler.profile_end('ff' if not self.use_moe else 'moe')
 
         if self.use_post_norm:
             x = self.norm3(x)

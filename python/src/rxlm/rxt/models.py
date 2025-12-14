@@ -11,7 +11,6 @@ from ..transformers.layers import ReactiveTransformerLayer
 from ..transformers.models import ReactiveTransformerBase, ReactiveTransformerEncoder, ReactiveTransformerDecoder
 from ..transformers.ff import get_activation_layer
 from ..transformers.sampler import sample, sample_batch
-from ..transformers.llm_layers import ClassicTransformerLayer
 from ..memory.stm import ShortTermMemory
 from ..memory.norm import init_memory_norm
 from ..memory.attention import StmMemoryAttention, InterlayerStmMemoryAttention, SelfStmMemoryAttention, SelfInterlayerStmMemoryAttention
@@ -19,7 +18,6 @@ from ..memory.gate import ResidualGate, ResidualGateType, SlotStatusType
 from ..utils import get_model_size
 from ..experimental.attention import init_experimental_attention
 from ..training.tokenizer import decode_post_process
-from ..training.utils import RxTModelProfiler
 
 
 class RxTComponentConfig(TypedDict):
@@ -123,7 +121,11 @@ class RxTComponentBase(nn.Module):
             moe_grouped_gemm: bool = True,
             moe_bias_mode: Literal['global', 'local', 'off'] = 'global',
             moe_shared_experts_bias_mode: Literal['global', 'local', 'off'] = 'local',
-            moe_use_weighted_shared_experts: bool = True,
+            moe_use_weighted_shared_experts: bool = False,
+            use_gated_attention: bool = False,
+            gated_attention_activation: str = 'sigmoid',
+            use_gated_cross_attention: bool = None,
+            use_attention_output_bias: bool = True, # legacy compat
             **kwargs
     ):
         super(RxTComponentBase, self).__init__(**kwargs)
@@ -160,14 +162,23 @@ class RxTComponentBase(nn.Module):
             linear_attn_mode=linear_attn_mode, linear_attn_expand_k=linear_attn_expand_k,
             linear_attn_expand_v=linear_attn_expand_v, linear_attn_use_short_conv=linear_attn_use_short_conv,
             linear_attn_conv_size=linear_attn_conv_size, linear_attn_use_gate=linear_attn_use_gate,
-            linear_attn_norm_eps=linear_attn_norm_eps, linear_attn_layer_idx=layer_idx
+            linear_attn_norm_eps=linear_attn_norm_eps, linear_attn_layer_idx=layer_idx,
+            use_gated_attention=use_gated_attention, gated_attention_activation=gated_attention_activation,
+            use_output_bias=use_attention_output_bias,
         )
 
         if not skip_memory_cross_attention:
-            cross_att_init = lambda: init_attention(embed_dim, att_heads, cross_att_type, cross_att_groups or att_groups, rope=rope,
-                                                        use_flash_attention=use_flash_attention, dropout=att_dropout,
-                                                        max_seq_len=seq_len, is_causal=False, rope_only_for_query=True,
-                                                        num_query_groups=cross_att_query_groups or att_query_groups)
+            if use_gated_cross_attention is None:
+                use_gated_cross_attention = use_gated_attention
+
+            cross_att_init = lambda: init_attention(
+                embed_dim, att_heads, cross_att_type, cross_att_groups or att_groups,
+                rope=rope, use_flash_attention=use_flash_attention, dropout=att_dropout,
+                max_seq_len=seq_len, is_causal=False, rope_only_for_query=True,
+                num_query_groups=cross_att_query_groups or att_query_groups,
+                use_gated_attention=use_gated_cross_attention, gated_attention_activation=gated_attention_activation,
+                use_output_bias=use_attention_output_bias,
+            )
 
 
             if stateless_layers_config is not None:
@@ -327,9 +338,9 @@ class RxTComponentBase(nn.Module):
         for layer in self.model.layers:
             layer.update_max_len(max_seq_len)
 
-    def forward(self, x: torch.Tensor, attention_mask: torch.Tensor = None, profiler: RxTModelProfiler = None) -> Union[
+    def forward(self, x: torch.Tensor, attention_mask: torch.Tensor = None) -> Union[
         torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        return self.model(x, attention_mask=attention_mask, profiler=profiler)
+        return self.model(x, attention_mask=attention_mask)
 
 
 class RxTEncoderComponent(RxTComponentBase):
@@ -360,8 +371,8 @@ class RxTEncoderComponent(RxTComponentBase):
             use_moe=use_moe,
         )
 
-    def forward(self, x: torch.Tensor, attention_mask: torch.Tensor = None, profiler: RxTModelProfiler = None) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.model(x, attention_mask=attention_mask, profiler=profiler)
+    def forward(self, x: torch.Tensor, attention_mask: torch.Tensor = None) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.model(x, attention_mask=attention_mask)
 
 
 class RxTDecoderComponent(RxTComponentBase):
@@ -397,8 +408,8 @@ class RxTDecoderComponent(RxTComponentBase):
             head_norm_type=head_norm_type,
         )
 
-    def forward(self, x: torch.Tensor, attention_mask: torch.Tensor = None, stm_kv_cache: list[tuple[torch.Tensor, torch.Tensor]] = None, use_self_attn_cache: bool = False, current_positions: torch.Tensor = None, profiler: RxTModelProfiler = None) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.model(x, attention_mask=attention_mask, stm_kv_cache=stm_kv_cache, use_self_attn_cache=use_self_attn_cache, current_positions=current_positions, profiler=profiler)
+    def forward(self, x: torch.Tensor, attention_mask: torch.Tensor = None, stm_kv_cache: list[tuple[torch.Tensor, torch.Tensor]] = None, use_self_attn_cache: bool = False, current_positions: torch.Tensor = None) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.model(x, attention_mask=attention_mask, stm_kv_cache=stm_kv_cache, use_self_attn_cache=use_self_attn_cache, current_positions=current_positions)
 
 
 class RxTSimpleMemoryAttentionComponent(nn.Module):

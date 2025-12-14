@@ -8,7 +8,6 @@ from sklearn.metrics import f1_score
 from ..training.base import BaseTrainer
 from .models import JointTrainingModel
 from .ddp import distributed_mean
-from .utils import RxTModelProfiler
 
 
 class JointLMTrainer(BaseTrainer):
@@ -31,7 +30,6 @@ class JointLMTrainer(BaseTrainer):
             decoder_loss_scale: float = 1.0,
             use_moe_aux_loss: bool = False,
             moe_aux_loss_scale: float = 0.01,
-            fake_stm_noise_level: float = None,
             is_sft: bool = False,
             **kwargs
     ):
@@ -42,7 +40,6 @@ class JointLMTrainer(BaseTrainer):
         self.decoder_loss_scale = decoder_loss_scale
         self.use_moe_aux_loss = use_moe_aux_loss
         self.moe_aux_loss_scale = moe_aux_loss_scale
-        self.fake_stm_noise_level = fake_stm_noise_level
         self.is_sft = is_sft
 
     def train_step(self, batch: dict[str, Union[torch.Tensor, dict[torch.Tensor]]], batch_idx: int) -> torch.Tensor:
@@ -109,7 +106,6 @@ class JointLMTrainer(BaseTrainer):
             encoder_inputs,
             decoder_inputs,
             attention_mask=attention_mask,
-            noise_level=self.fake_stm_noise_level,
         )
 
         encoder_loss = F.cross_entropy(
@@ -251,7 +247,6 @@ class IterativeJointLMTrainer(JointLMTrainer):
             decoder_loss_scale: float = 1.0,
             use_moe_aux_loss: bool = False,
             moe_aux_loss_scale: float = 0.01,
-            fake_stm_noise_level: float = None,
             is_sft: bool = False,
             use_te_fp8: bool = False,
             fp8_history_len: int = 256,
@@ -259,7 +254,6 @@ class IterativeJointLMTrainer(JointLMTrainer):
             collect_log_interval: int = 100,
             use_iterable_dataset: bool = True,
             debug_timing: bool = False,
-            profilers: tuple[RxTModelProfiler, RxTModelProfiler] = (None, None),
             **kwargs
     ):
         super().__init__(
@@ -273,7 +267,6 @@ class IterativeJointLMTrainer(JointLMTrainer):
             decoder_loss_scale=decoder_loss_scale,
             use_moe_aux_loss=use_moe_aux_loss,
             moe_aux_loss_scale=moe_aux_loss_scale,
-            fake_stm_noise_level=fake_stm_noise_level,
             is_sft=is_sft,
             use_iterable_dataset=use_iterable_dataset,
             **kwargs
@@ -282,7 +275,6 @@ class IterativeJointLMTrainer(JointLMTrainer):
         self.use_te_fp8 = use_te_fp8
         self.collect_log_interval = collect_log_interval
         self.debug_timing = debug_timing
-        self.profilers = profilers
         if use_te_fp8:
             self.use_amp = False
 
@@ -560,12 +552,7 @@ class IterativeJointLMTrainer(JointLMTrainer):
             encoder_inputs,
             decoder_inputs,
             attention_mask=attention_mask,
-            noise_level=self.fake_stm_noise_level,
-            profilers=self.profilers,
         )
-
-        for profiler in self.profilers:
-            profiler.next_step()
 
         encoder_loss = F.cross_entropy(
             encoder_logits.view(-1, self.vocab_size),

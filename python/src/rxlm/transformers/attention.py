@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from typing import Optional, Literal, Union
 import math
 from .positional import RotaryPositionalEmbedding, RelativePositionalEmbedding
-
+from .ff import get_activation_layer
 
 class MultiHeadAttention(nn.Module):
     """Custom, extendable Multi-head attention layer, with RoPE support"""
@@ -22,6 +22,9 @@ class MultiHeadAttention(nn.Module):
             use_flash_attention: bool = True,
             is_causal: bool = False,
             use_bias: bool = False,
+            use_output_bias: bool = True, # legacy compatibility - switch in model setting. Will be changed to False in next versions
+            use_gated_attention: bool = False,
+            gated_attention_activation: str = 'sigmoid',
             *args,
             **kwargs,
     ):
@@ -33,6 +36,7 @@ class MultiHeadAttention(nn.Module):
         self.use_flash_attention = use_flash_attention
         self.is_causal = is_causal
         self.use_bias = use_bias
+        self.use_output_bias = use_output_bias
         if use_relative_embeddings:
             self.use_flash_attention = False
             self.rel_embed = RelativePositionalEmbedding(max_seq_len, embed_dim // num_heads)
@@ -51,6 +55,15 @@ class MultiHeadAttention(nn.Module):
         self.key_cache: Optional[torch.Tensor] = None
         self.value_cache: Optional[torch.Tensor] = None
         self.mask_cache: Optional[torch.Tensor] = None
+        # from v0.3.34 - Gated Attention
+        self.use_gated_attention = use_gated_attention
+        if use_gated_attention:
+            self.gated_attention_activation = gated_attention_activation
+            self._init_gate(embed_dim)
+        else:
+            self.gated_attention_activation = None
+            self.gate_proj = None
+            self.gate_activation = None
 
     def _init_q(self, embed_dim: int):
         """Initialize query projection"""
@@ -63,7 +76,13 @@ class MultiHeadAttention(nn.Module):
 
     def _init_out(self, embed_dim: int):
         """Initialize output projection"""
-        self.out_proj = nn.Linear(embed_dim, embed_dim)
+        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=self.use_output_bias)
+
+    def _init_gate(self, embed_dim: int):
+        """Initialize gated attention"""
+        self.gate_proj = nn.Linear(embed_dim, embed_dim, bias=self.use_bias)
+        self.gate_activation = get_activation_layer(self.gated_attention_activation)
+        nn.init.normal_(self.gate_proj.weight, mean=1.0, std=0.01)
 
     def split_kv_head(self, projected: torch.Tensor, b: int, t: int, d: int) -> torch.Tensor:
         return projected.view(b, -1, self.num_heads, d // self.num_heads).transpose(1, 2)
@@ -197,6 +216,11 @@ class MultiHeadAttention(nn.Module):
             mask = self.mask_cache
             attn_output = self._calculate_attention(q, k, v, b, t, d, mask=mask, generate_mode=True)
 
+        if self.use_gated_attention:
+            gate_logits = self.gate_proj(query)
+            gate = self.gate_activation(gate_logits)
+            attn_output = attn_output * gate
+
         return self.out_proj(attn_output)
 
     def forward(
@@ -215,13 +239,19 @@ class MultiHeadAttention(nn.Module):
         b, t, d = query.size()
         q, k, v = self._forward_qkv(query, key, value, b, t, d, stm_kv_cache=stm_kv_cache)
         if not self.rel_embed:
-            if not stm_kv_cache or t !=1:
+            if not stm_kv_cache or t != 1:
                 q, k = self._apply_rope(q, k)
             elif stm_kv_cache and current_positions is not None:
                 q = self.rope.forward_one_from(q, current_positions)
             attn_output = self._calculate_attention(q, k, v, b, t, d, mask=mask)
         else:
             attn_output = self._calculate_attention_with_relative_embedding(q, k, v, b, t, d, mask=mask)
+
+        if self.use_gated_attention:
+            gate_logits = self.gate_proj(query)
+            gate = self.gate_activation(gate_logits)
+            attn_output = attn_output * gate
+
         return self.out_proj(attn_output)
 
 
@@ -423,9 +453,17 @@ class SparseQueryAttention(MultiHeadAttention):
         """Initialize output projection"""
         if self.num_query_groups < self.num_groups:
             # revSQA
-            self.out_proj = nn.Linear(embed_dim // (self.num_heads // self.num_groups), embed_dim)
+            self.out_proj = nn.Linear(embed_dim // (self.num_heads // self.num_groups), embed_dim, bias=self.use_output_bias)
         else:
-            self.out_proj = nn.Linear(embed_dim // (self.num_heads // self.num_query_groups), embed_dim)
+            self.out_proj = nn.Linear(embed_dim // (self.num_heads // self.num_query_groups), embed_dim, bias=self.use_output_bias)
+
+    def _init_gate(self, embed_dim: int):
+        if self.num_query_groups < self.num_groups:
+            self.gate_proj = nn.Linear(embed_dim, embed_dim // (self.num_heads // self.num_groups), bias=self.use_bias)
+        else:
+            self.gate_proj = nn.Linear(embed_dim, embed_dim // (self.num_heads // self.num_query_groups), bias=self.use_bias)
+        nn.init.normal_(self.gate_proj.weight, mean=1.0, std=0.01)
+        self.gate_activation = get_activation_layer(self.gated_attention_activation)
 
     def _transpose_output(self, attn_output: torch.Tensor, b: int, t: int, d: int):
         """Transpose attention output back to (B, T, D) shape"""
@@ -701,6 +739,9 @@ def init_attention(
         linear_attn_use_gate: bool = True,
         linear_attn_layer_idx: int = None,
         linear_attn_norm_eps: float = 1e-5,
+        use_gated_attention: bool = False,
+        gated_attention_activation: str = 'sigmoid',
+        use_output_bias: bool = True, # legacy compat
 ) -> Union[MultiHeadAttention, LinearAttention]:
     if not is_linear_attention:
         assert attention_type in ['mha', 'gqa', 'mqa', 'sqa'], "Error, attention type should be one of: 'mha', 'gqa', 'mqa' or 'sqa'"
@@ -720,6 +761,9 @@ def init_attention(
                 use_flash_attention=use_flash_attention,
                 is_causal=is_causal,
                 use_bias=use_bias,
+                use_gated_attention=use_gated_attention,
+                gated_attention_activation=gated_attention_activation,
+                use_output_bias=use_output_bias,
             )
         elif attention_type == "gqa":
             return GroupedQueryAttention(
@@ -735,6 +779,9 @@ def init_attention(
                 use_flash_attention=use_flash_attention,
                 is_causal=is_causal,
                 use_bias=use_bias,
+                use_gated_attention=use_gated_attention,
+                gated_attention_activation=gated_attention_activation,
+                use_output_bias=use_output_bias
             )
         elif attention_type == "mqa":
             return MultiQueryAttention(
@@ -749,6 +796,9 @@ def init_attention(
                 use_flash_attention=use_flash_attention,
                 is_causal=is_causal,
                 use_bias=use_bias,
+                use_gated_attention=use_gated_attention,
+                gated_attention_activation=gated_attention_activation,
+                use_output_bias=use_output_bias
             )
         else:
             return MultiHeadAttention(
@@ -763,6 +813,9 @@ def init_attention(
                 use_flash_attention=use_flash_attention,
                 is_causal=is_causal,
                 use_bias=use_bias,
+                use_gated_attention=use_gated_attention,
+                gated_attention_activation=gated_attention_activation,
+                use_output_bias=use_output_bias
             )
     else:
         return LinearAttention(

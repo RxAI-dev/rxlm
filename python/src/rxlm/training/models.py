@@ -8,7 +8,6 @@ from ..rxt.models import (
     RxTDecoder, RxTEncoder, RxTSimpleMemoryAttention,
     RxTSelfMemoryAttention, RxTInterlayerMemoryAttention, RxTSelfInterlayerMemoryAttention
 )
-from .utils import RxTModelProfiler
 
 RxTMemoryAttentionType: TypeAlias = Union[
     RxTSimpleMemoryAttention, RxTSelfMemoryAttention,
@@ -36,6 +35,8 @@ class JointTrainingModel(nn.Module):
             encoder: RxTEncoder,
             decoder: RxTDecoder,
             mlm_head: MLMHead,
+            noise_level: float = None,
+            masking_prob: float = None,
             *args,
             **kwargs
     ):
@@ -43,6 +44,9 @@ class JointTrainingModel(nn.Module):
         self.encoder = encoder
         self.mlm_head = mlm_head
         self.decoder = decoder
+
+        self.noise_level = noise_level
+        self.masking_prob = masking_prob
 
     def forward_one_result(self, x_e: torch.Tensor, x_d: torch.Tensor, attention_mask: torch.Tensor = None) -> torch.Tensor:
         self.decoder.model.stm.reset()
@@ -52,24 +56,24 @@ class JointTrainingModel(nn.Module):
         y_d = self.decoder(x_d, attention_mask=attention_mask)
         return y_d
 
-    def forward(self, x_e: torch.Tensor, x_d: torch.Tensor, attention_mask: torch.Tensor = None, noise_level: float = None, profilers: tuple[RxTModelProfiler, RxTModelProfiler] = (None, None)) -> tuple[
+    def forward(self, x_e: torch.Tensor, x_d: torch.Tensor, attention_mask: torch.Tensor = None) -> tuple[
         torch.Tensor, torch.Tensor]:
-        encoder_profiler, decoder_profiler = profilers
 
         self.decoder.model.stm.reset()
 
-        encoder_result, encoded_layers = self.encoder(x_e, attention_mask=attention_mask, profiler=encoder_profiler)
-        if encoder_profiler is not None:
-            encoder_profiler.profile_start('head')
+        encoder_result, encoded_layers = self.encoder(x_e, attention_mask=attention_mask)
         y_e = self.mlm_head(encoder_result)
-        if encoder_profiler is not None:
-            encoder_profiler.profile_end('head')
 
         detached_layers = encoded_layers.clone().detach()
-        fake_stm = detached_layers if noise_level is None else detached_layers + noise_level * torch.randn_like(detached_layers, device=detached_layers.device)
+
+        if self.masking_prob is not None:
+            results_mask = torch.rand(detached_layers.shape[:-1], device=detached_layers.device) > self.masking_prob
+            detached_layers = detached_layers * results_mask.unsqueeze(-1)
+
+        fake_stm = detached_layers if self.noise_level is None else detached_layers + self.noise_level * torch.randn_like(detached_layers, device=detached_layers.device)
 
         self.decoder.model.stm.update_all(fake_stm)
-        y_d = self.decoder(x_d, attention_mask=attention_mask, profiler=decoder_profiler)
+        y_d = self.decoder(x_d, attention_mask=attention_mask)
         return y_e, y_d
 
 
