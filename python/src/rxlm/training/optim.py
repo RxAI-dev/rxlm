@@ -26,6 +26,7 @@ class MuonAdamW(Optimizer):
             lr=muon_cfg.get('lr', 0.02),
             momentum=muon_cfg.get('momentum', 0.95),
             nesterov=muon_cfg.get('nesterov', True),
+            weight_decay=muon_cfg.get('weight_decay', 0.01),
         ) if matrix_params else None
 
         self.adamw = torch.optim.AdamW(

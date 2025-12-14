@@ -315,6 +315,15 @@ class RxTComponentBase(nn.Module):
     def active_parameters(self) -> list[nn.Parameter]:
         return self.model.active_parameters()
 
+    def embedding_parameters(self) -> list[nn.Parameter]:
+        return list(self.model.embedding_parameters())
+
+    def body_parameters(self) -> list[nn.Parameter]:
+        return self.model.body_parameters()
+
+    def head_parameters(self) -> list[nn.Parameter]:
+        return self.model.head_parameters()
+
     def freeze_without_memory(self, unfreeze_norms: bool = True):
         for param in self.model.parameters():
             param.requires_grad_(False)

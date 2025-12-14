@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from typing import Iterator
 from .positional import AbsolutePositionalEmbedding
 from .mask import create_causal_mask
 from ..memory.stm import ShortTermMemory
@@ -56,6 +57,9 @@ class ReactiveTransformerBase(nn.Module):
         shared = [param for layer in self.shared_layers for param in layer.active_parameters()] if self.shared_layers else []
         return own + shared
 
+    def embedding_parameters(self) -> Iterator[nn.Parameter]:
+        return self.embedding.parameters()
+
     def moe_router_loss(self):
         if self.use_moe:
             return torch.stack([self.layers[i].moe_router_loss() for i in range(self.num_own_layers) if self.layers[i].use_moe or self.layers[i].use_moe_att] + [
@@ -105,6 +109,17 @@ class ReactiveTransformerDecoder(ReactiveTransformerBase):
         else:
             self.head_norm = None
         self.stateless_layers = stateless_layers
+
+    def body_parameters(self) -> list[nn.Parameter]:
+        layer_params = super().not_memory_parameters() + self.memory_parameters()
+        stateless_params = [param for layer in self.stateless_layers for param in layer.parameters()]
+        return stateless_params + layer_params
+
+    def head_parameters(self) -> list[nn.Parameter]:
+        head_params = list(self.head.parameters())
+        if self.use_head_norm:
+            head_params += list(self.head_norm.parameters())
+        return head_params
 
     def not_memory_parameters(self) -> list[nn.Parameter]:
         layer_params = super().not_memory_parameters()
@@ -219,4 +234,8 @@ class ReactiveTransformerEncoder(ReactiveTransformerBase):
             hidden_states.append(x)
         return x, torch.stack(hidden_states)
 
+    def body_parameters(self) -> list[nn.Parameter]:
+        return super().not_memory_parameters()
 
+    def head_parameters(self) -> list[nn.Parameter]:
+        return []
