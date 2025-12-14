@@ -92,6 +92,10 @@ class JointLMTrainer(BaseTrainer):
                 self.writer.add_scalar('Router aux loss/Valid', router_loss.item(), self.total_steps)
                 self.writer.add_scalar('Model loss/Valid', main_loss.item(), self.total_steps)
 
+        if self.components_loss_log_interval is not None:
+            if self.total_steps % self.components_loss_log_interval == 0:
+                print(f"Router loss: {router_loss.item():.4f}")
+
         return loss
 
     def compute_loss(self, batch: dict[str, dict[str, torch.Tensor]]) -> tuple[
