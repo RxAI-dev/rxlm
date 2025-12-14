@@ -668,7 +668,7 @@ class VectorizedMoeFeedForward(nn.Module):
             expert_outputs = expert_outputs + b2_selected.unsqueeze(1)  # Add bias
 
         if self.use_weighted_shared_experts:
-            routing_weights = routing_weights * (self.top_k / (self.top_k + 1))
+            routing_weights = routing_weights * (self.top_k / (self.top_k + self.num_shared_experts))
 
         # Apply routing weights: [top_k, 1, embed_dim] * [top_k, 1, 1] -> [top_k, 1, embed_dim]
         weighted_outputs = expert_outputs * routing_weights.view(-1, 1, 1)
@@ -732,7 +732,7 @@ class VectorizedMoeFeedForward(nn.Module):
 
             # === STEP 5: REVERSE PERMUTATION AND COMBINE RESULTS ===
             if self.use_weighted_shared_experts:
-                permuted_routing_weights = permuted_routing_weights * (self.top_k / (self.top_k + 1))
+                permuted_routing_weights = permuted_routing_weights * (self.top_k / (self.top_k + self.num_shared_experts))
 
             weighted_outputs = concatenated_outputs * permuted_routing_weights.unsqueeze(1)
 
@@ -765,7 +765,7 @@ class VectorizedMoeFeedForward(nn.Module):
                 shared_combined = shared_combined + self.shared_experts_bias.unsqueeze(0)
 
             if self.use_weighted_shared_experts:
-                weights_modifier = 1 / (self.top_k + 1)
+                weights_modifier = self.num_shared_experts / (self.top_k + self.num_shared_experts)
                 shared_combined = shared_combined * weights_modifier
 
             final_output = final_output + shared_combined
@@ -990,7 +990,7 @@ class VectorizedGatedMoeFeedForward(VectorizedMoeFeedForward):
             expert_outputs = expert_outputs + b2_selected.unsqueeze(1)  # Add bias
 
         if self.use_weighted_shared_experts:
-            routing_weights = routing_weights * (self.top_k / (self.top_k + 1))
+            routing_weights = routing_weights * (self.top_k / (self.top_k + self.num_shared_experts))
 
         # Apply routing weights: [top_k, 1, embed_dim] * [top_k, 1, 1] -> [top_k, 1, embed_dim]
         weighted_outputs = expert_outputs * routing_weights.view(-1, 1, 1)
