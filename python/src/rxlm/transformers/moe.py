@@ -549,6 +549,7 @@ class VectorizedMoeFeedForward(nn.Module):
         # - With trans_b=False, gmm does: input @ weight per expert
 
         # FC1: [total_tokens, embed_dim] @ [E, embed_dim, hidden_dim] -> [total_tokens, hidden_dim]
+        tokens_per_expert = tokens_per_expert.cpu().detach().to(dtype=torch.long)
         hidden = gg.ops.gmm(dispatched_x.to(dtype=torch.bfloat16), self.w1.to(dtype=torch.bfloat16), tokens_per_expert, trans_b=False)
         if self.bias_mode == 'local':
             hidden = hidden + self._expand_bias(self.b1, tokens_per_expert)
@@ -913,7 +914,7 @@ class VectorizedGatedMoeFeedForward(VectorizedMoeFeedForward):
             [total_tokens, embed_dim] - expert outputs in same order as dispatched_x
         """
         x_bf16 = dispatched_x.to(dtype=torch.bfloat16)
-
+        tokens_per_expert = tokens_per_expert.cpu().detach().to(dtype=torch.long)
         # FC1 (Gated): [total_tokens, embed_dim] @ [E, embed_dim, hidden_dim * 2] -> [total_tokens, hidden_dim * 2]
         gated_hidden = gg.ops.gmm(x_bf16, self.w1, tokens_per_expert, trans_b=False)
         if self.bias_mode == 'local':
