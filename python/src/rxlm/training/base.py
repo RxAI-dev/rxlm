@@ -89,6 +89,7 @@ class BaseTrainer(ABC):
             )
         else:
             self.fp8_recipe = None
+
     @abstractmethod
     def compute_loss(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         pass
