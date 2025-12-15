@@ -77,14 +77,25 @@ class RotaryPositionalEmbedding(nn.Module):
         return self.cache[None, None, :seq_len, :]
 
     def _rotate(self, x: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
-        x1 = x[..., 0::2]
-        x2 = x[..., 1::2]
-        # Apply the rotation
-        x_rotated1 = x1 * torch.cos(freqs) - x2 * torch.sin(freqs)
-        x_rotated2 = x1 * torch.sin(freqs) + x2 * torch.cos(freqs)
-        # Concatenate the rotated parts back together
-        x_rotated = torch.cat((x_rotated1, x_rotated2), dim=-1)
-        return x_rotated
+        # Optimized rotation using view/reshape to avoid slicing and concat overhead
+        # Reshape x to (..., seq_len, dim//2, 2) for paired processing
+        *batch_dims, seq_len, dim = x.shape
+        x_reshaped = x.view(*batch_dims, seq_len, dim // 2, 2)
+
+        # Extract pairs without creating new tensors via slicing
+        x1, x2 = x_reshaped.unbind(dim=-1)
+
+        # Compute sin/cos once and reuse
+        cos_freqs = torch.cos(freqs)
+        sin_freqs = torch.sin(freqs)
+
+        # Apply rotation
+        x_rotated1 = x1 * cos_freqs - x2 * sin_freqs
+        x_rotated2 = x1 * sin_freqs + x2 * cos_freqs
+
+        # Stack and reshape back - more efficient than cat for interleaved pattern
+        x_rotated = torch.stack((x_rotated1, x_rotated2), dim=-1)
+        return x_rotated.view(*batch_dims, seq_len, dim)
 
 
 class AbsolutePositionalEmbedding(nn.Module):

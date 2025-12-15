@@ -2,12 +2,13 @@ import torch
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel
 import math
-from typing import Union
+from typing import Union, Optional
 from datetime import datetime
 from sklearn.metrics import f1_score
 from ..training.base import BaseTrainer
 from .models import JointTrainingModel
 from .ddp import distributed_mean
+from ..compile import compile_training_model, CompileConfig, is_compile_available
 
 
 class JointLMTrainer(BaseTrainer):
@@ -261,6 +262,8 @@ class IterativeJointLMTrainer(JointLMTrainer):
             collect_log_interval: int = 100,
             use_iterable_dataset: bool = True,
             debug_timing: bool = False,
+            use_torch_compile: bool = False,
+            compile_config: Optional[CompileConfig] = None,
             **kwargs
     ):
         super().__init__(
@@ -281,6 +284,16 @@ class IterativeJointLMTrainer(JointLMTrainer):
         self.collect_n_batches = collect_n_batches
         self.collect_log_interval = collect_log_interval
         self.debug_timing = debug_timing
+        self.use_torch_compile = use_torch_compile
+        self.compile_config = compile_config
+
+        # Apply torch.compile if requested
+        if self.use_torch_compile and is_compile_available():
+            print("Applying torch.compile optimizations to model...")
+            self.model = compile_training_model(self.model, self.compile_config)
+            print("torch.compile optimizations applied successfully.")
+        elif self.use_torch_compile and not is_compile_available():
+            print("Warning: torch.compile requested but not available (requires PyTorch 2.0+)")
 
     def _run_epoch(
             self,
