@@ -75,6 +75,8 @@ class BaseTrainer(ABC):
         self.num_dataloader_workers = num_dataloader_workers
         self.ddp_shuffle = ddp_shuffle
         self.use_te_fp8 = use_te_fp8
+        self.fp8_history_len = fp8_history_len
+        self.fp8_margin = fp8_margin
         if use_te_fp8:
             from transformer_engine.common import recipe
             self.use_amp = False

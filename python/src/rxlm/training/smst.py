@@ -114,6 +114,19 @@ class SupervisedMemoryAttentionTrainer(BaseTrainer):
                                 accumulated_tokens += train_batch['attention_mask'].sum()
                                 loss, cosine_sim = self.compute_loss(train_batch, weights=label_weights,
                                                                      inner_step_idx=inner_step_idx)
+                        elif self.use_te_fp8:
+                            from transformer_engine.pytorch import fp8_autocast
+                            with fp8_autocast(enabled=True, fp8_recipe=self.fp8_recipe):
+                                train_batch = {
+                                    **smart_concat(next_query, next_answer, max_length=self.max_seq_len,
+                                                   pad_token_id=self.pad_token_id),
+                                    'acc_stm': accumulated_stm,
+                                }
+                                accumulated_tokens += train_batch['attention_mask'].sum()
+                                loss, cosine_sim = self.compute_loss(train_batch, weights=label_weights,
+                                                                     inner_step_idx=inner_step_idx)
+
+
                         else:
                             train_batch = {
                                 **smart_concat(next_query, next_answer, max_length=self.max_seq_len,
@@ -203,15 +216,9 @@ class SupervisedMemoryAttentionTrainer(BaseTrainer):
             self.writer.flush()
 
     def _move_batch(self, batch: TokenizedDict) -> TokenizedDict:
-        if self.use_amp:
-            return {
+        return {
                 'input_ids': batch['input_ids'].to(self.device),
                 'attention_mask': batch['attention_mask'].to(self.device),
-            }
-        else:
-            return {
-                'input_ids': batch['input_ids'].to(self.device, dtype=self.dtype),
-                'attention_mask': batch['attention_mask'].to(self.device, dtype=self.dtype),
             }
 
     def _move_multiple_batches(self, *batches: TokenizedDict) -> list[TokenizedDict]:
@@ -355,6 +362,18 @@ class SupervisedMemoryAttentionTrainer(BaseTrainer):
                                 }
                                 loss, cosine_sim = self.compute_loss(valid_batch, weights=label_weights,
                                                                      inner_step_idx=inner_step_idx)
+                        elif self.use_te_fp8:
+                            from transformer_engine.pytorch import fp8_autocast
+                            with fp8_autocast(enabled=True, fp8_recipe=self.fp8_recipe):
+                                train_batch = {
+                                    **smart_concat(next_query, next_answer, max_length=self.max_seq_len,
+                                                   pad_token_id=self.pad_token_id),
+                                    'acc_stm': accumulated_stm,
+                                }
+                                loss, cosine_sim = self.compute_loss(train_batch, weights=label_weights,
+                                                                     inner_step_idx=inner_step_idx)
+
+
                         else:
                             valid_batch = {
                                 **smart_concat(next_query, next_answer, max_length=self.max_seq_len,
@@ -519,6 +538,20 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
                                 }
                                 accumulated_tokens += train_batch['next']['attention_mask'].sum()
                                 loss, _ = self.compute_loss(train_batch, query_lens=query_lens, is_first_step=not self.use_system_prompt and inner_step_idx==0)
+                        elif self.use_te_fp8:
+                            from transformer_engine.pytorch import fp8_autocast
+                            with fp8_autocast(enabled=True, fp8_recipe=self.fp8_recipe):
+                                train_batch = {
+                                    'prev': smart_concat(prev_query, prev_answer, max_length=self.max_seq_len,
+                                                         pad_token_id=self.pad_token_id) if not self.use_system_prompt or inner_step_idx != 0 else self._move_batch(
+                                        batch['system']),
+                                    'next': smart_concat(next_query, next_answer, max_length=self.max_seq_len,
+                                                         pad_token_id=self.pad_token_id),
+                                }
+                                accumulated_tokens += train_batch['attention_mask'].sum()
+                                loss, _ = self.compute_loss(train_batch, query_lens=query_lens, is_first_step=not self.use_system_prompt and inner_step_idx==0)
+
+
                         else:
                             train_batch = {
                                 'prev': smart_concat(prev_query, prev_answer, max_length=self.max_seq_len,
@@ -610,16 +643,11 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
             self.writer.flush()
 
     def _move_batch(self, batch: TokenizedDict) -> TokenizedDict:
-        if self.use_amp:
-            return {
+        return {
                 'input_ids': batch['input_ids'].to(self.device),
                 'attention_mask': batch['attention_mask'].to(self.device),
             }
-        else:
-            return {
-                'input_ids': batch['input_ids'].to(self.device, dtype=self.dtype),
-                'attention_mask': batch['attention_mask'].to(self.device, dtype=self.dtype),
-            }
+
 
     def _move_multiple_batches(self, *batches: TokenizedDict) -> list[TokenizedDict]:
         return [self._move_batch(batch) for batch in batches]
@@ -775,6 +803,20 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
                                                          pad_token_id=self.pad_token_id),
                                 }
                                 decoder_loss, decoder_logits = self.compute_loss(valid_batch, query_lens=query_lens, is_first_step=not self.use_system_prompt and inner_step_idx==0)
+
+                        elif self.use_te_fp8:
+                            from transformer_engine.pytorch import fp8_autocast
+                            with fp8_autocast(enabled=True, fp8_recipe=self.fp8_recipe):
+                                valid_batch = {
+                                    'prev': smart_concat(prev_query, prev_answer, max_length=self.max_seq_len,
+                                                         pad_token_id=self.pad_token_id) if not self.use_system_prompt or inner_step_idx != 0 else self._move_batch(
+                                        batch['system']),
+                                    'next': smart_concat(next_query, next_answer, max_length=self.max_seq_len,
+                                                         pad_token_id=self.pad_token_id),
+                                }
+                                decoder_loss, decoder_logits = self.compute_loss(valid_batch, query_lens=query_lens,
+                                                                                 is_first_step=not self.use_system_prompt and inner_step_idx == 0)
+
                         else:
                             valid_batch = {
                                 'prev': smart_concat(prev_query, prev_answer, max_length=self.max_seq_len,
