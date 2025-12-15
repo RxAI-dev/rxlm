@@ -138,7 +138,7 @@ class BaseTrainer(ABC):
                 sampler=train_sampler,
                 pin_memory=True,
                 collate_fn=self.dataset_collate_fn,
-                num_workers=world_size * self.num_dataloader_workers,
+                num_workers=self.num_dataloader_workers,
             )
         else:
             train_sampler = None
