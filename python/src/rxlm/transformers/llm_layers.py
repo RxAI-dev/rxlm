@@ -2,7 +2,8 @@ import torch
 import torch.nn as nn
 from .attention import MultiHeadAttention
 from .ff import FeedForward, GatedFeedForward
-from .moe import MoeFeedForward, GatedMoeFeedForward
+from .moe import MoeFeedForward, GatedMoeFeedForward, VectorizedGatedMoeFeedForward, VectorizedMoeFeedForward
+from typing import Literal
 
 class ClassicTransformerLayer(nn.Module):
     """Classic Transformer layer - classic decoder-only/encoder-only Transformer layer with self-attention and Feed-Forward network."""
@@ -24,6 +25,12 @@ class ClassicTransformerLayer(nn.Module):
             use_moe_att: bool = False,
             router_amp: bool = False,
             router_dtype: torch.dtype = torch.float32,
+            use_vectorized_moe: bool = False,
+            vectorized_moe_from_legacy: bool = False,
+            moe_grouped_gemm: bool = True,
+            moe_bias_mode: Literal['global', 'local', 'off'] = 'global',
+            moe_shared_experts_bias_mode: Literal['global', 'local', 'off'] = 'local',
+            moe_use_weighted_shared_experts: bool = False,
             *args,
             **kwargs,
     ):
@@ -33,14 +40,34 @@ class ClassicTransformerLayer(nn.Module):
 
         if use_gated:
             if use_moe:
-                self.ff = GatedMoeFeedForward(embed_dim, ff_dim, num_experts, ff_activation, top_k=moe_top_k,
+                if use_vectorized_moe:
+                    self.ff = VectorizedGatedMoeFeedForward(
+                        embed_dim, ff_dim, num_experts, ff_activation,
+                        top_k=moe_top_k, dropout=ff_dropout, num_shared_experts=num_shared_experts,
+                        router_amp=router_amp, router_dtype=router_dtype, from_legacy=vectorized_moe_from_legacy,
+                        use_grouped_gemm=moe_grouped_gemm, bias_mode=moe_bias_mode,
+                        shared_experts_bias_mode=moe_shared_experts_bias_mode,
+                        use_weighted_shared_experts=moe_use_weighted_shared_experts
+                    )
+                else:
+                    self.ff = GatedMoeFeedForward(embed_dim, ff_dim, num_experts, ff_activation, top_k=moe_top_k,
                                               dropout=ff_dropout, num_shared_experts=num_shared_experts,
                                               router_amp=router_amp, router_dtype=router_dtype)
             else:
                 self.ff = GatedFeedForward(embed_dim, ff_dim, ff_activation, dropout=ff_dropout)
         else:
             if use_moe:
-                self.ff = MoeFeedForward(embed_dim, ff_dim, num_experts, ff_activation, top_k=moe_top_k,
+                if use_vectorized_moe:
+                    self.ff = VectorizedMoeFeedForward(
+                        embed_dim, ff_dim, num_experts, ff_activation,
+                        top_k=moe_top_k, dropout=ff_dropout, num_shared_experts=num_shared_experts,
+                        router_amp=router_amp, router_dtype=router_dtype, from_legacy=vectorized_moe_from_legacy,
+                        use_grouped_gemm=moe_grouped_gemm, bias_mode=moe_bias_mode,
+                        shared_experts_bias_mode=moe_shared_experts_bias_mode,
+                        use_weighted_shared_experts=moe_use_weighted_shared_experts
+                    )
+                else:
+                    self.ff = MoeFeedForward(embed_dim, ff_dim, num_experts, ff_activation, top_k=moe_top_k,
                                          dropout=ff_dropout, num_shared_experts=num_shared_experts,
                                          router_amp=router_amp, router_dtype=router_dtype)
             else:

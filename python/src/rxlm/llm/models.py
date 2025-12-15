@@ -85,6 +85,15 @@ class DecoderOnlyTransformer(nn.Module, PyTorchModelHubMixin, pipeline_tag="text
             head_norm_type: str = 'layer_norm',
             router_amp: bool = False,
             router_dtype: torch.dtype = torch.float32,
+            use_vectorized_moe: bool = True,
+            vectorized_moe_from_legacy: bool = False,
+            moe_grouped_gemm: bool = True,
+            moe_bias_mode: Literal['global', 'local', 'off'] = 'global',
+            moe_shared_experts_bias_mode: Literal['global', 'local', 'off'] = 'local',
+            moe_use_weighted_shared_experts: bool = False,
+            use_gated_attention: bool = False,
+            gated_attention_activation: str = 'sigmoid',
+            use_attention_output_bias: bool = True,  # legacy compat
             **kwargs
     ):
         super(DecoderOnlyTransformer, self).__init__(**kwargs)
@@ -101,7 +110,9 @@ class DecoderOnlyTransformer(nn.Module, PyTorchModelHubMixin, pipeline_tag="text
         if att_type in ['mha', 'gqa', 'mqa', 'sqa']:
             att_init = lambda: init_attention(embed_dim, att_heads, att_type, att_groups, rope=rope,
                                               use_flash_attention=use_flash_attention, dropout=att_dropout,
-                                              max_seq_len=seq_len, is_causal=True, num_query_groups=att_num_query_groups)
+                                              max_seq_len=seq_len, is_causal=True, num_query_groups=att_num_query_groups,
+                                              use_gated_attention=use_gated_attention, gated_attention_activation=gated_attention_activation,
+                                              use_output_bias=use_attention_output_bias)
         else:
             att_init = lambda: init_experimental_attention(embed_dim, att_heads, att_type, att_groups, rope=rope,
                                                            use_flash_attention=use_flash_attention, dropout=att_dropout,
@@ -123,7 +134,7 @@ class DecoderOnlyTransformer(nn.Module, PyTorchModelHubMixin, pipeline_tag="text
                     use_rms_norm=use_rms_norm,
                     self_attention=att_init(),
                     use_moe_att=use_moe_att,
-                )
+                    )
             else:
                 return ClassicTransformerLayer(
                     embed_dim,
@@ -140,6 +151,12 @@ class DecoderOnlyTransformer(nn.Module, PyTorchModelHubMixin, pipeline_tag="text
                     use_moe_att=use_moe_att,
                     router_amp=router_amp,
                     router_dtype=router_dtype,
+                    use_vectorized_moe=use_vectorized_moe,
+                    vectorized_moe_from_legacy=vectorized_moe_from_legacy,
+                    moe_grouped_gemm=moe_grouped_gemm,
+                    moe_bias_mode=moe_bias_mode,
+                    moe_shared_experts_bias_mode=moe_shared_experts_bias_mode,
+                    moe_use_weighted_shared_experts=moe_use_weighted_shared_experts
                 )
 
 
