@@ -274,7 +274,7 @@ def compile_training_model(
         training_model.decoder = compile_model(
             training_model.decoder,
             config,
-            compile_ff=False,  # MoE layers handle their own FF
+            compile_ff=True,
             compile_moe=True,
             compile_attention=True,
         )

@@ -32,6 +32,8 @@ class JointLMTrainer(BaseTrainer):
             use_moe_aux_loss: bool = False,
             moe_aux_loss_scale: float = 0.01,
             is_sft: bool = False,
+            use_torch_compile: bool = False,
+            compile_config: Optional[CompileConfig] = None,
             **kwargs
     ):
         super(JointLMTrainer, self).__init__(model, device, use_amp=use_amp, dtype=dtype, **kwargs)
@@ -42,6 +44,17 @@ class JointLMTrainer(BaseTrainer):
         self.use_moe_aux_loss = use_moe_aux_loss
         self.moe_aux_loss_scale = moe_aux_loss_scale
         self.is_sft = is_sft
+
+        self.use_torch_compile = use_torch_compile
+        self.compile_config = compile_config
+
+        # Apply torch.compile if requested
+        if self.use_torch_compile and is_compile_available():
+            print("Applying torch.compile optimizations to model...")
+            self.model = compile_training_model(self.model, self.compile_config)
+            print("torch.compile optimizations applied successfully.")
+        elif self.use_torch_compile and not is_compile_available():
+            print("Warning: torch.compile requested but not available (requires PyTorch 2.0+)")
 
     def train_step(self, batch: dict[str, Union[torch.Tensor, dict[torch.Tensor]]], batch_idx: int) -> torch.Tensor:
         batch = {
@@ -279,21 +292,13 @@ class IterativeJointLMTrainer(JointLMTrainer):
             moe_aux_loss_scale=moe_aux_loss_scale,
             is_sft=is_sft,
             use_iterable_dataset=use_iterable_dataset,
+            use_torch_compile=use_torch_compile,
+            compile_config=compile_config,
             **kwargs
         )
         self.collect_n_batches = collect_n_batches
         self.collect_log_interval = collect_log_interval
         self.debug_timing = debug_timing
-        self.use_torch_compile = use_torch_compile
-        self.compile_config = compile_config
-
-        # Apply torch.compile if requested
-        if self.use_torch_compile and is_compile_available():
-            print("Applying torch.compile optimizations to model...")
-            self.model = compile_training_model(self.model, self.compile_config)
-            print("torch.compile optimizations applied successfully.")
-        elif self.use_torch_compile and not is_compile_available():
-            print("Warning: torch.compile requested but not available (requires PyTorch 2.0+)")
 
     def _run_epoch(
             self,
