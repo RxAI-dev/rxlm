@@ -33,6 +33,9 @@ class BaseTrainer(ABC):
             use_iterable_dataset: bool = False,
             num_dataloader_workers: int = 0,
             ddp_shuffle: bool = True,
+            use_te_fp8: bool = False,
+            fp8_history_len: int = 256,
+            fp8_margin: int = 0,
     ):
         if get_batch_size is None:
             self.get_batch_size = lambda batch: batch['attention_mask'].size(0)
@@ -71,6 +74,21 @@ class BaseTrainer(ABC):
         self.use_iterable_dataset = use_iterable_dataset
         self.num_dataloader_workers = num_dataloader_workers
         self.ddp_shuffle = ddp_shuffle
+        self.use_te_fp8 = use_te_fp8
+        self.fp8_history_len = fp8_history_len
+        self.fp8_margin = fp8_margin
+        if use_te_fp8:
+            from transformer_engine.common import recipe
+            self.use_amp = False
+
+            self.fp8_recipe = recipe.DelayedScaling(
+                fp8_format=recipe.Format.HYBRID,
+                amax_history_len=fp8_history_len,
+                amax_compute_algo='max',
+                margin=fp8_margin,
+            )
+        else:
+            self.fp8_recipe = None
 
     @abstractmethod
     def compute_loss(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
@@ -80,6 +98,11 @@ class BaseTrainer(ABC):
         if self.use_amp:
             batch = {k: v.to(self.device) for k, v in batch.items()}
             with torch.amp.autocast(device_type=self.device.type, dtype=self.dtype):
+                loss, _ = self.compute_loss(batch)
+        elif self.use_te_fp8 and self.fp8_recipe:
+            import transformer_engine.pytorch as te
+            batch = {k: v.to(self.device) for k, v in batch.items()}
+            with te.fp8_autocast(enabled=True, fp8_recipe=self.fp8_recipe):
                 loss, _ = self.compute_loss(batch)
         else:
             batch = {k: v.to(self.device, dtype=self.dtype) for k, v in batch.items()}
@@ -278,6 +301,11 @@ class BaseTrainer(ABC):
         if self.use_amp:
             batch = {k: v.to(self.device) for k, v in batch.items()}
             with torch.amp.autocast(device_type=self.device.type, dtype=self.dtype):
+                loss, outputs = self.compute_loss(batch)
+        elif self.use_te_fp8 and self.fp8_recipe:
+            import transformer_engine.pytorch as te
+            batch = {k: v.to(self.device) for k, v in batch.items()}
+            with te.fp8_autocast(enabled=True, fp8_recipe=self.fp8_recipe):
                 loss, outputs = self.compute_loss(batch)
         else:
             batch = {k: v.to(self.device, dtype=self.dtype) for k, v in batch.items()}
