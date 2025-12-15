@@ -95,17 +95,15 @@ class BaseTrainer(ABC):
         pass
 
     def train_step(self, batch: dict[str, torch.Tensor], _batch_idx: int) -> torch.Tensor:
+        batch = {k: v.to(self.device) for k, v in batch.items()}
         if self.use_amp:
-            batch = {k: v.to(self.device) for k, v in batch.items()}
             with torch.amp.autocast(device_type=self.device.type, dtype=self.dtype):
                 loss, _ = self.compute_loss(batch)
         elif self.use_te_fp8 and self.fp8_recipe:
             import transformer_engine.pytorch as te
-            batch = {k: v.to(self.device) for k, v in batch.items()}
             with te.fp8_autocast(enabled=True, fp8_recipe=self.fp8_recipe):
                 loss, _ = self.compute_loss(batch)
         else:
-            batch = {k: v.to(self.device, dtype=self.dtype) for k, v in batch.items()}
             loss, _ = self.compute_loss(batch)
         return loss
 
@@ -298,17 +296,15 @@ class BaseTrainer(ABC):
             self.writer.add_scalar('Avg. Accuracy/Valid', val_metrics['accuracy'], epoch)
 
     def valid_step(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+        batch = {k: v.to(self.device) for k, v in batch.items()}
         if self.use_amp:
-            batch = {k: v.to(self.device) for k, v in batch.items()}
             with torch.amp.autocast(device_type=self.device.type, dtype=self.dtype):
                 loss, outputs = self.compute_loss(batch)
         elif self.use_te_fp8 and self.fp8_recipe:
             import transformer_engine.pytorch as te
-            batch = {k: v.to(self.device) for k, v in batch.items()}
             with te.fp8_autocast(enabled=True, fp8_recipe=self.fp8_recipe):
                 loss, outputs = self.compute_loss(batch)
         else:
-            batch = {k: v.to(self.device, dtype=self.dtype) for k, v in batch.items()}
             loss, outputs = self.compute_loss(batch)
         return loss, outputs
 

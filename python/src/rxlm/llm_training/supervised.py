@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel
@@ -346,11 +347,11 @@ class IterativeAutoregressiveTrainer(AutoregressiveTrainer):
                 self._train_on_collected_batches(
                     collected_batches,
                     optimizer,
-                    scaler,
                     scheduler,
                     accumulated_tokens,
                     base_batch_idx,
-                    batch_size
+                    batch_size,
+                    scaler=scaler
                 )
                 base_batch_idx = batch_idx + 1
                 # Clear collected batches
@@ -365,11 +366,11 @@ class IterativeAutoregressiveTrainer(AutoregressiveTrainer):
             self._train_on_collected_batches(
                 collected_batches,
                 optimizer,
-                scaler,
                 scheduler,
                 accumulated_tokens,
                 base_batch_idx,
                 batch_size,
+                scaler=scaler
             )
 
         # Validation at the end of epoch
@@ -401,11 +402,11 @@ class IterativeAutoregressiveTrainer(AutoregressiveTrainer):
             self,
             collected_batches: list,
             optimizer: torch.optim.Optimizer,
-            scaler: torch.cuda.amp.GradScaler,
             scheduler: torch.optim.lr_scheduler.LRScheduler,
             accumulated_tokens: torch.Tensor,
             base_batch_idx: int,
-            batch_size: int
+            batch_size: int,
+            scaler: torch.cuda.amp.GradScaler = None
     ):
         """Train on collected batches"""
         for i, batch in enumerate(collected_batches):
@@ -420,7 +421,7 @@ class IterativeAutoregressiveTrainer(AutoregressiveTrainer):
                 self.accumulated_loss += loss
                 loss = loss / self.gradient_accumulation_steps
 
-                if self.use_amp:
+                if self.use_amp and scaler is not None:
                     scaler.scale(loss).backward()
                 else:
                     loss.backward()
@@ -431,7 +432,7 @@ class IterativeAutoregressiveTrainer(AutoregressiveTrainer):
                     if self.use_amp:
                         scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0, error_if_nonfinite=False)
-                    if self.use_amp:
+                    if self.use_amp and scaler is not None:
                         scaler.step(optimizer)
                         scaler.update()
                     else:

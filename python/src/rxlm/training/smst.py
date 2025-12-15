@@ -138,7 +138,7 @@ class SupervisedMemoryAttentionTrainer(BaseTrainer):
                         self.accumulated_loss += loss
                         loss = loss / self.gradient_accumulation_steps
 
-                        if self.use_amp:
+                        if self.use_amp and scaler is not None:
                             scaler.scale(loss).backward()
                         else:
                             loss.backward()
@@ -150,7 +150,7 @@ class SupervisedMemoryAttentionTrainer(BaseTrainer):
                                 scaler.unscale_(optimizer)
                             torch.nn.utils.clip_grad_norm_(self._get_model().trainable_parameters(), max_norm=1.0,
                                                            error_if_nonfinite=False)
-                            if self.use_amp:
+                            if self.use_amp and scaler is not None:
                                 scaler.step(optimizer)
                                 scaler.update()
                             else:
@@ -539,12 +539,11 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
                             with fp8_autocast(enabled=True, fp8_recipe=self.fp8_recipe):
                                 train_batch = {
                                     'prev': smart_concat(prev_query, prev_answer, max_length=self.max_seq_len,
-                                                         pad_token_id=self.pad_token_id) if not self.use_system_prompt or inner_step_idx != 0 else self._move_batch(
-                                        batch['system']),
+                                                         pad_token_id=self.pad_token_id) if not self.use_system_prompt or inner_step_idx != 0 else self._move_batch(batch['system']),
                                     'next': smart_concat(next_query, next_answer, max_length=self.max_seq_len,
                                                          pad_token_id=self.pad_token_id),
                                 }
-                                accumulated_tokens += train_batch['attention_mask'].sum()
+                                accumulated_tokens += train_batch['next']['attention_mask'].sum()
                                 loss, _ = self.compute_loss(train_batch, query_lens=query_lens, is_first_step=not self.use_system_prompt and inner_step_idx==0)
                         else:
                             train_batch = {
@@ -559,7 +558,7 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
                         self.accumulated_loss += loss
                         loss = loss / self.gradient_accumulation_steps
 
-                        if self.use_amp:
+                        if self.use_amp and scaler is not None:
                             scaler.scale(loss).backward()
                         else:
                             loss.backward()
@@ -571,7 +570,7 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
                                 scaler.unscale_(optimizer)
                             torch.nn.utils.clip_grad_norm_(self._get_model().trainable_parameters(), max_norm=1.0,
                                                            error_if_nonfinite=False)
-                            if self.use_amp:
+                            if self.use_amp and scaler is not None:
                                 scaler.step(optimizer)
                                 scaler.update()
                             else:
@@ -605,9 +604,10 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
                             )
 
                         for callback in self.callbacks:
-                            should_stop = callback.on_batch_end(self.model,
-                                                                (batch_idx * number_of_inner_steps) + inner_step_idx,
-                                                                loss, train_batch['next'])
+                            should_stop = callback.on_batch_end(
+                                self.model, (batch_idx * number_of_inner_steps) + inner_step_idx,
+                                loss, train_batch['next']
+                            )
                             if should_stop:
                                 self.is_running = False
 
@@ -801,8 +801,7 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
                             with fp8_autocast(enabled=True, fp8_recipe=self.fp8_recipe):
                                 valid_batch = {
                                     'prev': smart_concat(prev_query, prev_answer, max_length=self.max_seq_len,
-                                                         pad_token_id=self.pad_token_id) if not self.use_system_prompt or inner_step_idx != 0 else self._move_batch(
-                                        batch['system']),
+                                                         pad_token_id=self.pad_token_id) if not self.use_system_prompt or inner_step_idx != 0 else self._move_batch(batch['system']),
                                     'next': smart_concat(next_query, next_answer, max_length=self.max_seq_len,
                                                          pad_token_id=self.pad_token_id),
                                 }

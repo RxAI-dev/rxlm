@@ -43,30 +43,20 @@ class JointLMTrainer(BaseTrainer):
         self.is_sft = is_sft
 
     def train_step(self, batch: dict[str, Union[torch.Tensor, dict[torch.Tensor]]], batch_idx: int) -> torch.Tensor:
+        batch = {
+            k: (
+                {kk: vv.to(self.device) for kk, vv in v.items()} if not torch.is_tensor(v) else v.to(self.device)
+            ) for k, v in batch.items()
+        }
+
         if self.use_amp:
-            batch = {
-                k: (
-                    {kk: vv.to(self.device) for kk, vv in v.items()} if not torch.is_tensor(v) else v.to(self.device)
-                ) for k, v in batch.items()
-            }
             with torch.amp.autocast(device_type=self.device.type, dtype=self.dtype):
                 (encoder_loss, decoder_loss), _ = self.compute_loss(batch)
         elif self.use_te_fp8 and self.fp8_recipe:
-            batch = {
-                k: (
-                    {kk: vv.to(self.device) for kk, vv in v.items()} if not torch.is_tensor(v) else v.to(self.device)
-                ) for k, v in batch.items()
-            }
             import transformer_engine.pytorch as te
             with te.fp8_autocast(enabled=True, fp8_recipe=self.fp8_recipe):
                 (encoder_loss, decoder_loss), _ = self.compute_loss(batch)
         else:
-            batch = {
-                k: (
-                    {kk: vv.to(self.device, dtype=self.dtype) for kk, vv in v.items()} if not torch.is_tensor(
-                        v) else v.to(self.device, dtype=self.dtype)
-                ) for k, v in batch.items()
-            }
             (encoder_loss, decoder_loss), _ = self.compute_loss(batch)
 
         if self.components_loss_log_interval is not None:
@@ -84,30 +74,19 @@ class JointLMTrainer(BaseTrainer):
 
     def valid_step(self, batch: dict[str, Union[torch.Tensor, dict[torch.Tensor]]]) -> tuple[
         tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
+        batch = {
+            k: (
+                {kk: vv.to(self.device) for kk, vv in v.items()} if not torch.is_tensor(v) else v.to(self.device)
+            ) for k, v in batch.items()
+        }
         if self.use_amp:
-            batch = {
-                k: (
-                    {kk: vv.to(self.device) for kk, vv in v.items()} if not torch.is_tensor(v) else v.to(self.device)
-                ) for k, v in batch.items()
-            }
             with torch.amp.autocast(device_type=self.device.type, dtype=self.dtype):
                 (encoder_loss, decoder_loss), (encoder_logits, decoder_logits) = self.compute_loss(batch)
         elif self.use_te_fp8 and self.fp8_recipe:
-            batch = {
-                k: (
-                    {kk: vv.to(self.device) for kk, vv in v.items()} if not torch.is_tensor(v) else v.to(self.device)
-                ) for k, v in batch.items()
-            }
             import transformer_engine.pytorch as te
             with te.fp8_autocast(enabled=True, fp8_recipe=self.fp8_recipe):
                 (encoder_loss, decoder_loss), (encoder_logits, decoder_logits) = self.compute_loss(batch)
         else:
-            batch = {
-                k: (
-                    {kk: vv.to(self.device, dtype=self.dtype) for kk, vv in v.items()} if not torch.is_tensor(
-                        v) else v.to(self.device, dtype=self.dtype)
-                ) for k, v in batch.items()
-            }
             (encoder_loss, decoder_loss), (encoder_logits, decoder_logits) = self.compute_loss(batch)
 
         return (encoder_loss, decoder_loss), (encoder_logits, decoder_logits)
@@ -204,7 +183,6 @@ class JointLMTrainer(BaseTrainer):
         with torch.no_grad():
             for batch in val_dataloader:
                 if self.get_batch_size(batch) == batch_size:
-
                     (encoder_loss, decoder_loss), (encoder_logits, decoder_logits) = self.valid_step(batch)
                     enc_loss += encoder_loss
                     dec_loss += decoder_loss
@@ -280,9 +258,6 @@ class IterativeJointLMTrainer(JointLMTrainer):
             use_moe_aux_loss: bool = False,
             moe_aux_loss_scale: float = 0.01,
             is_sft: bool = False,
-            use_te_fp8: bool = False,
-            fp8_history_len: int = 256,
-            fp8_margin: int = 0,
             collect_log_interval: int = 100,
             use_iterable_dataset: bool = True,
             debug_timing: bool = False,
@@ -304,23 +279,8 @@ class IterativeJointLMTrainer(JointLMTrainer):
             **kwargs
         )
         self.collect_n_batches = collect_n_batches
-        self.use_te_fp8 = use_te_fp8
         self.collect_log_interval = collect_log_interval
         self.debug_timing = debug_timing
-        if use_te_fp8:
-            self.use_amp = False
-
-            import transformer_engine.pytorch as te
-            from transformer_engine.common import recipe
-
-            self.fp8_recipe = recipe.DelayedScaling(
-                fp8_format=recipe.Format.HYBRID,
-                amax_history_len=fp8_history_len,
-                amax_compute_algo='max',
-                margin=fp8_margin,
-            )
-        else:
-            self.fp8_recipe = None
 
     def _run_epoch(
             self,
@@ -503,110 +463,3 @@ class IterativeJointLMTrainer(JointLMTrainer):
                     should_stop = callback.on_batch_end(self.model, self.epoch_steps, loss, batch)
                     if should_stop:
                         self.is_running = False
-
-    def train_step(self, batch: dict[str, Union[torch.Tensor, dict[torch.Tensor]]], batch_idx: int) -> torch.Tensor:
-        if self.use_amp:
-            batch = {
-                k: (
-                    {kk: vv.to(self.device) for kk, vv in v.items()} if not torch.is_tensor(v) else v.to(self.device)
-                ) for k, v in batch.items()
-            }
-            with torch.amp.autocast(device_type=self.device.type, dtype=self.dtype):
-                (encoder_loss, decoder_loss), _ = self.compute_loss(batch)
-        elif self.use_te_fp8 and self.fp8_recipe:
-            batch = {
-                k: (
-                    {kk: vv.to(self.device) for kk, vv in v.items()} if not torch.is_tensor(v) else v.to(self.device)
-                ) for k, v in batch.items()
-            }
-            import transformer_engine.pytorch as te
-            with te.fp8_autocast(enabled=True, fp8_recipe=self.fp8_recipe):
-                (encoder_loss, decoder_loss), _ = self.compute_loss(batch)
-        else:
-            batch = {
-                k: (
-                    {kk: vv.to(self.device, dtype=self.dtype) for kk, vv in v.items()} if not torch.is_tensor(v) else v.to(self.device, dtype=self.dtype)
-                ) for k, v in batch.items()
-            }
-            (encoder_loss, decoder_loss), _ = self.compute_loss(batch)
-
-        if self.components_loss_log_interval is not None:
-            if batch_idx % self.components_loss_log_interval == 0:
-                print(f"Encoder loss: {encoder_loss.item():.4f}")
-                print(f"Decoder loss: {decoder_loss.item():.4f}")
-                if self.encoder_loss_scale != 1.0:
-                    print(
-                        f"Encoder loss scaled by {self.encoder_loss_scale}: {(encoder_loss * self.encoder_loss_scale).item():.4f}")
-                if self.decoder_loss_scale != 1.0:
-                    print(
-                        f"Decoder loss scaled by {self.decoder_loss_scale}: {(decoder_loss * self.decoder_loss_scale).item():.4f}")
-
-        return (encoder_loss * self.encoder_loss_scale) + (decoder_loss * self.decoder_loss_scale)
-
-    def valid_step(self, batch: dict[str, Union[torch.Tensor, dict[torch.Tensor]]]) -> tuple[
-        tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
-        if self.use_amp:
-            batch = {
-                k: (
-                    {kk: vv.to(self.device) for kk, vv in v.items()} if not torch.is_tensor(v) else v.to(self.device)
-                ) for k, v in batch.items()
-            }
-            with torch.amp.autocast(device_type=self.device.type, dtype=self.dtype):
-                (encoder_loss, decoder_loss), (encoder_logits, decoder_logits) = self.compute_loss(batch)
-        elif self.use_te_fp8 and self.fp8_recipe:
-            batch = {
-                k: (
-                    {kk: vv.to(self.device) for kk, vv in v.items()} if not torch.is_tensor(v) else v.to(self.device)
-                ) for k, v in batch.items()
-            }
-            import transformer_engine.pytorch as te
-            with te.fp8_autocast(enabled=True, fp8_recipe=self.fp8_recipe):
-                (encoder_loss, decoder_loss), (encoder_logits, decoder_logits) = self.compute_loss(batch)
-        else:
-            batch = {
-                k: (
-                    {kk: vv.to(self.device, dtype=self.dtype) for kk, vv in v.items()} if not torch.is_tensor(v) else v.to(self.device, dtype=self.dtype)
-                ) for k, v in batch.items()
-            }
-            (encoder_loss, decoder_loss), (encoder_logits, decoder_logits) = self.compute_loss(batch)
-
-        return (encoder_loss, decoder_loss), (encoder_logits, decoder_logits)
-
-    def compute_loss(self, batch: dict[str, dict[str, torch.Tensor]]) -> tuple[
-        tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
-        encoder_inputs = batch['encoder']['input_ids']
-        encoder_labels = batch['encoder']['labels']
-        decoder_inputs = batch['decoder']['input_ids']
-        decoder_targets = batch['decoder']['targets']
-        attention_mask = batch['attention_mask']
-
-        encoder_logits, decoder_logits = self.model(
-            encoder_inputs,
-            decoder_inputs,
-            attention_mask=attention_mask,
-        )
-
-        encoder_loss = F.cross_entropy(
-            encoder_logits.view(-1, self.vocab_size),
-            encoder_labels.view(-1),
-            ignore_index=-100
-        )
-
-        shifted_logits = decoder_logits[:, :-1].contiguous()
-        shifted_targets = decoder_targets[:, 1:].contiguous()
-
-        if self.is_sft:
-            decoder_loss = F.cross_entropy(
-                shifted_logits.view(-1, self.vocab_size),
-                shifted_targets.view(-1),
-                ignore_index=-100
-            )
-        else:
-            decoder_loss = F.cross_entropy(
-                shifted_logits.view(-1, self.vocab_size),
-                shifted_targets.view(-1)
-            )
-
-        decoder_loss = self._moe_aux_loss(decoder_loss)
-
-        return (encoder_loss, decoder_loss), (encoder_logits, decoder_logits)
