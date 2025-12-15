@@ -46,17 +46,25 @@ class JointLMTrainer(BaseTrainer):
         if self.use_amp:
             batch = {
                 k: (
-                    { kk: vv.to(self.device) for kk, vv in v.items() } if not torch.is_tensor(v) else v.to(self.device)
+                    {kk: vv.to(self.device) for kk, vv in v.items()} if not torch.is_tensor(v) else v.to(self.device)
                 ) for k, v in batch.items()
             }
             with torch.amp.autocast(device_type=self.device.type, dtype=self.dtype):
                 (encoder_loss, decoder_loss), _ = self.compute_loss(batch)
+        elif self.use_te_fp8 and self.fp8_recipe:
+            batch = {
+                k: (
+                    {kk: vv.to(self.device) for kk, vv in v.items()} if not torch.is_tensor(v) else v.to(self.device)
+                ) for k, v in batch.items()
+            }
+            import transformer_engine.pytorch as te
+            with te.fp8_autocast(enabled=True, fp8_recipe=self.fp8_recipe):
+                (encoder_loss, decoder_loss), _ = self.compute_loss(batch)
         else:
             batch = {
                 k: (
-                    {
-                        kk: vv.to(self.device, dtype=self.dtype) for kk, vv in v.items()
-                    } if not torch.is_tensor(v) else v.to(self.device, dtype=self.dtype)
+                    {kk: vv.to(self.device, dtype=self.dtype) for kk, vv in v.items()} if not torch.is_tensor(
+                        v) else v.to(self.device, dtype=self.dtype)
                 ) for k, v in batch.items()
             }
             (encoder_loss, decoder_loss), _ = self.compute_loss(batch)
@@ -67,12 +75,42 @@ class JointLMTrainer(BaseTrainer):
                 print(f"Decoder loss: {decoder_loss.item():.4f}")
                 if self.encoder_loss_scale != 1.0:
                     print(
-                        f"Encoder loss scaled by {self.encoder_loss_scale}: {(encoder_loss * self.encoder_loss_scale).item() :.4f}")
+                        f"Encoder loss scaled by {self.encoder_loss_scale}: {(encoder_loss * self.encoder_loss_scale).item():.4f}")
                 if self.decoder_loss_scale != 1.0:
                     print(
-                        f"Decoder loss scaled by {self.decoder_loss_scale}: {(decoder_loss * self.decoder_loss_scale).item() :.4f}")
+                        f"Decoder loss scaled by {self.decoder_loss_scale}: {(decoder_loss * self.decoder_loss_scale).item():.4f}")
 
         return (encoder_loss * self.encoder_loss_scale) + (decoder_loss * self.decoder_loss_scale)
+
+    def valid_step(self, batch: dict[str, Union[torch.Tensor, dict[torch.Tensor]]]) -> tuple[
+        tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
+        if self.use_amp:
+            batch = {
+                k: (
+                    {kk: vv.to(self.device) for kk, vv in v.items()} if not torch.is_tensor(v) else v.to(self.device)
+                ) for k, v in batch.items()
+            }
+            with torch.amp.autocast(device_type=self.device.type, dtype=self.dtype):
+                (encoder_loss, decoder_loss), (encoder_logits, decoder_logits) = self.compute_loss(batch)
+        elif self.use_te_fp8 and self.fp8_recipe:
+            batch = {
+                k: (
+                    {kk: vv.to(self.device) for kk, vv in v.items()} if not torch.is_tensor(v) else v.to(self.device)
+                ) for k, v in batch.items()
+            }
+            import transformer_engine.pytorch as te
+            with te.fp8_autocast(enabled=True, fp8_recipe=self.fp8_recipe):
+                (encoder_loss, decoder_loss), (encoder_logits, decoder_logits) = self.compute_loss(batch)
+        else:
+            batch = {
+                k: (
+                    {kk: vv.to(self.device, dtype=self.dtype) for kk, vv in v.items()} if not torch.is_tensor(
+                        v) else v.to(self.device, dtype=self.dtype)
+                ) for k, v in batch.items()
+            }
+            (encoder_loss, decoder_loss), (encoder_logits, decoder_logits) = self.compute_loss(batch)
+
+        return (encoder_loss, decoder_loss), (encoder_logits, decoder_logits)
 
     def _moe_aux_loss(self, main_loss: torch.Tensor) -> torch.Tensor:
         if not self.use_moe_aux_loss:
@@ -166,18 +204,8 @@ class JointLMTrainer(BaseTrainer):
         with torch.no_grad():
             for batch in val_dataloader:
                 if self.get_batch_size(batch) == batch_size:
-                    if self.use_amp:
-                        batch = {
-                            k: ({kk: vv.to(self.device) for kk, vv in v.items()} if not torch.is_tensor(v) else v.to(
-                                self.device)) for k, v in batch.items()}
-                        with torch.amp.autocast(device_type=self.device.type, dtype=self.dtype):
-                            (encoder_loss, decoder_loss), (encoder_logits, decoder_logits) = self.compute_loss(batch)
-                    else:
-                        batch = {k: (
-                            {kk: vv.to(self.device, dtype=self.dtype) for kk, vv in v.items()} if not torch.is_tensor(
-                                v) else v.to(self.device, dtype=self.dtype)) for k, v in batch.items()}
-                        (encoder_loss, decoder_loss), (encoder_logits, decoder_logits) = self.compute_loss(batch)
 
+                    (encoder_loss, decoder_loss), (encoder_logits, decoder_logits) = self.valid_step(batch)
                     enc_loss += encoder_loss
                     dec_loss += decoder_loss
                     val_loss += (encoder_loss * self.encoder_loss_scale) + (decoder_loss * self.decoder_loss_scale)

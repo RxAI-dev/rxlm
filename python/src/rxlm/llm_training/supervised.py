@@ -288,9 +288,6 @@ class IterativeAutoregressiveTrainer(AutoregressiveTrainer):
             moe_aux_loss_scale: float = 0.01,
             use_f1_metrics: bool = False,
             is_sft: bool = False,
-            use_te_fp8: bool = False,
-            fp8_history_len: int = 256,
-            fp8_margin: int = 0,
             collect_log_interval: int = 100,
             use_iterable_dataset: bool = True,
             **kwargs
@@ -309,20 +306,7 @@ class IterativeAutoregressiveTrainer(AutoregressiveTrainer):
             **kwargs
         )
         self.collect_n_batches = collect_n_batches
-        self.use_te_fp8 = use_te_fp8
         self.collect_log_interval = collect_log_interval
-        if use_te_fp8:
-            from transformer_engine.common import recipe
-            self.use_amp = False
-
-            self.fp8_recipe = recipe.DelayedScaling(
-                fp8_format=recipe.Format.HYBRID,
-                amax_history_len=fp8_history_len,
-                amax_compute_algo='max',
-                margin=fp8_margin,
-            )
-        else:
-            self.fp8_recipe = None
 
     def _run_epoch(
             self,
@@ -491,33 +475,3 @@ class IterativeAutoregressiveTrainer(AutoregressiveTrainer):
                     should_stop = callback.on_batch_end(self.model, self.epoch_steps, loss, batch)
                     if should_stop:
                         self.is_running = False
-
-    def train_step(self, batch: dict[str, torch.Tensor], _batch_idx: int) -> torch.Tensor:
-        if self.use_amp:
-            batch = {k: v.to(self.device) for k, v in batch.items()}
-            with torch.amp.autocast(device_type=self.device.type, dtype=self.dtype):
-                loss, _ = self.compute_loss(batch)
-        elif self.use_te_fp8 and self.fp8_recipe:
-            import transformer_engine.pytorch as te
-            batch = {k: v.to(self.device) for k, v in batch.items()}
-            with te.fp8_autocast(enabled=True, fp8_recipe=self.fp8_recipe):
-                loss, _ = self.compute_loss(batch)
-        else:
-            batch = {k: v.to(self.device, dtype=self.dtype) for k, v in batch.items()}
-            loss, _ = self.compute_loss(batch)
-        return loss
-
-    def valid_step(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.use_amp:
-            batch = {k: v.to(self.device) for k, v in batch.items()}
-            with torch.amp.autocast(device_type=self.device.type, dtype=self.dtype):
-                loss, outputs = self.compute_loss(batch)
-        elif self.use_te_fp8 and self.fp8_recipe:
-            import transformer_engine.pytorch as te
-            batch = {k: v.to(self.device) for k, v in batch.items()}
-            with te.fp8_autocast(enabled=True, fp8_recipe=self.fp8_recipe):
-                loss, outputs = self.compute_loss(batch)
-        else:
-            batch = {k: v.to(self.device, dtype=self.dtype) for k, v in batch.items()}
-            loss, outputs = self.compute_loss(batch)
-        return loss, outputs
