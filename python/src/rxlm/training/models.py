@@ -64,13 +64,22 @@ class JointTrainingModel(nn.Module):
         encoder_result, encoded_layers = self.encoder(x_e, attention_mask=attention_mask)
         y_e = self.mlm_head(encoder_result)
 
-        detached_layers = encoded_layers.clone().detach()
+        # Optimized: detach without clone - we're not modifying the original
+        with torch.no_grad():
+            fake_stm = encoded_layers.detach()
 
-        if self.masking_prob is not None:
-            results_mask = torch.rand(detached_layers.shape[:-1], device=detached_layers.device) > self.masking_prob
-            detached_layers = detached_layers * results_mask.unsqueeze(-1)
+            # Apply masking in-place style operations where possible
+            if self.masking_prob is not None:
+                # Use bernoulli_ for in-place generation where applicable
+                mask_shape = fake_stm.shape[:-1]
+                results_mask = torch.empty(mask_shape, device=fake_stm.device, dtype=fake_stm.dtype)
+                results_mask.bernoulli_(1.0 - self.masking_prob)
+                fake_stm = fake_stm * results_mask.unsqueeze(-1)
 
-        fake_stm = detached_layers if self.noise_level is None else detached_layers + self.noise_level * torch.randn_like(detached_layers, device=detached_layers.device)
+            # Add noise if needed - fused operation
+            if self.noise_level is not None:
+                noise = torch.empty_like(fake_stm).normal_(0, self.noise_level)
+                fake_stm = fake_stm + noise
 
         self.decoder.model.stm.update_all(fake_stm)
         y_d = self.decoder(x_d, attention_mask=attention_mask)

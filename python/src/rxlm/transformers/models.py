@@ -222,17 +222,27 @@ class ReactiveTransformerEncoder(ReactiveTransformerBase):
         if attention_mask is not None:
             attention_mask = attention_mask.unsqueeze(1).unsqueeze(1).bool()
 
-        hidden_states = []
+        # Pre-allocate hidden states tensor for better memory efficiency
+        total_layers = self.num_shared_layers + self.num_own_layers
+        batch_size, seq_len, embed_dim = x.shape
+        hidden_states = torch.empty(
+            total_layers, batch_size, seq_len, embed_dim,
+            device=x.device, dtype=x.dtype
+        )
+
+        layer_idx = 0
         # Process shared layers
         if self.shared_layers is not None:
             for i in range(self.num_shared_layers):
                 x = self._handle_encoder_layer(i, x, mask=attention_mask, is_shared=True)
-                hidden_states.append(x)
+                hidden_states[layer_idx] = x
+                layer_idx += 1
         # Process own layers
         for i in range(self.num_own_layers):
             x = self._handle_encoder_layer(i, x, mask=attention_mask)
-            hidden_states.append(x)
-        return x, torch.stack(hidden_states)
+            hidden_states[layer_idx] = x
+            layer_idx += 1
+        return x, hidden_states
 
     def _handle_encoder_layer(self, i: int, x: torch.Tensor, mask: torch.Tensor = None, is_shared: bool = False):
         layer = self.shared_layers[i] if is_shared else self.layers[i]
