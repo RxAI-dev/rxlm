@@ -66,7 +66,14 @@ class RxTComponentConfig(TypedDict):
     use_vectorized_moe: Optional[bool]
     vectorized_moe_from_legacy: Optional[bool]
     moe_grouped_gemm: Optional[bool]
-
+    moe_bias_mode: Optional[Literal['global', 'local', 'off']]
+    moe_shared_experts_bias_mode: Optional[Literal['global', 'local', 'off']]
+    moe_use_weighted_shared_experts: Optional[bool]
+    use_gated_attention: Optional[bool]
+    gated_attention_activation: Optional[str]
+    use_gated_cross_attention: Optional[bool]
+    use_attention_output_bias: Optional[bool] # legacy compat
+    legacy_stm_in_encoder: Optional[bool] # legacy compat
 
 class RxTComponentBase(nn.Module):
     """Base class for RxT-Alpha (Reactive Transformer) components (encoder and decoder)"""
@@ -126,6 +133,7 @@ class RxTComponentBase(nn.Module):
             gated_attention_activation: str = 'sigmoid',
             use_gated_cross_attention: bool = None,
             use_attention_output_bias: bool = True, # legacy compat
+            legacy_stm_in_encoder: bool = False, # legacy compat
             **kwargs
     ):
         super(RxTComponentBase, self).__init__(**kwargs)
@@ -148,7 +156,8 @@ class RxTComponentBase(nn.Module):
 
         embedding = nn.Embedding(vocab_size, embed_dim)
         rope = RotaryPositionalEmbedding(embed_dim // att_heads, seq_len) if not use_nope else None
-        stm = ShortTermMemory(num_layers, embed_dim, stm_size)
+
+        stm = ShortTermMemory(num_layers, embed_dim, stm_size) if not skip_memory_cross_attention or legacy_stm_in_encoder else None
 
         ff_activation = get_activation_layer(ff_activation)
 
@@ -291,7 +300,7 @@ class RxTComponentBase(nn.Module):
             stateless_layers=stateless_layers, head_norm_type=head_norm_type,
         )
 
-    def _init_model(self, stm: ShortTermMemory, layers: nn.ModuleList, embedding: nn.Embedding,
+    def _init_model(self, stm: Union[ShortTermMemory, None], layers: nn.ModuleList, embedding: nn.Embedding,
                     use_flash_attention: bool, embed_dim: int, vocab_size: int, use_moe: bool,
                     use_head_norm: bool = False, init_identity_norm: bool = False,
                     stateless_layers: nn.ModuleList = None, head_norm_type: str = 'layer_norm') -> ReactiveTransformerBase:
@@ -360,7 +369,7 @@ class RxTEncoderComponent(RxTComponentBase):
 
     def _init_model(
             self,
-            stm: ShortTermMemory,
+            stm: Union[ShortTermMemory, None],
             layers: nn.ModuleList,
             embedding: nn.Embedding,
             use_flash_attention: bool,
@@ -391,7 +400,8 @@ class RxTDecoderComponent(RxTComponentBase):
         super(RxTDecoderComponent, self).__init__(True, **kwargs)
 
     def _init_model(
-            self, stm: ShortTermMemory,
+            self,
+            stm: Union[ShortTermMemory, None],
             layers: nn.ModuleList,
             embedding: nn.Embedding,
             use_flash_attention: bool,

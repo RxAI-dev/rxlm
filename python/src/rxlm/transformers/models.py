@@ -11,9 +11,9 @@ class ReactiveTransformerBase(nn.Module):
 
     def __init__(
             self,
-            stm: ShortTermMemory,
             embedding: nn.Embedding,
             own_layers: nn.ModuleList,
+            stm: ShortTermMemory = None,
             shared_layers: nn.ModuleList = None,
             absolute_embedding: AbsolutePositionalEmbedding = None,
             use_flash_attention: bool = False,
@@ -91,8 +91,8 @@ class ReactiveTransformerDecoder(ReactiveTransformerBase):
     def __init__(
             self, embed_dim: int, vocab_size: int, use_head_norm: bool = False,
             init_identity_norm: bool = False, stateless_layers: nn.ModuleList = None,
-            head_norm_type: str = 'layer_norm',  *args, **kwargs):
-        super(ReactiveTransformerDecoder, self).__init__(*args, **kwargs)
+            head_norm_type: str = 'layer_norm', **kwargs):
+        super(ReactiveTransformerDecoder, self).__init__(**kwargs)
 
         self.head = nn.Linear(embed_dim, vocab_size)
         self.use_head_norm = use_head_norm
@@ -226,13 +226,17 @@ class ReactiveTransformerEncoder(ReactiveTransformerBase):
         # Process shared layers
         if self.shared_layers is not None:
             for i in range(self.num_shared_layers):
-                x = self._handle_layer(i, x, mask=attention_mask, is_shared=True)
+                x = self._handle_encoder_layer(i, x, mask=attention_mask, is_shared=True)
                 hidden_states.append(x)
         # Process own layers
         for i in range(self.num_own_layers):
-            x = self._handle_layer(i, x, mask=attention_mask)
+            x = self._handle_encoder_layer(i, x, mask=attention_mask)
             hidden_states.append(x)
         return x, torch.stack(hidden_states)
+
+    def _handle_encoder_layer(self, i: int, x: torch.Tensor, mask: torch.Tensor = None, is_shared: bool = False):
+        layer = self.shared_layers[i] if is_shared else self.layers[i]
+        return layer(x, stm=None, mask=mask)
 
     def body_parameters(self) -> list[nn.Parameter]:
         return super().not_memory_parameters()
