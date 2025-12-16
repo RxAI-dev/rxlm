@@ -401,6 +401,20 @@ class IterativeJointLMTrainer(JointLMTrainer):
             scaler: torch.cuda.amp.GradScaler = None
     ):
         start_time = None
+
+        pre_forward_time = 0
+        forward_time = 0
+        backward_time = 0
+        optim_time = 0
+        board_time = 0
+        callbacks_time = 0
+
+        forward_times = []
+        backward_times = []
+        optim_times = []
+        board_times = []
+        callbacks_times = []
+
         """Train on collected batches"""
         for i, batch in enumerate(collected_batches):
             if not self.is_running:
@@ -418,6 +432,21 @@ class IterativeJointLMTrainer(JointLMTrainer):
                         print(f'1 batch time: {b_time}')
                         print(f'item time: {i_time}')
 
+                        forward_b_time = sum(forward_times) / len(forward_times)
+                        backward_b_time = sum(backward_times) / len(backward_times)
+                        optim_b_time = sum(optim_times) / len(optim_times)
+                        board_b_time = sum(board_times) / len(board_times)
+                        callbacks_b_time = sum(callbacks_times) / len(callbacks_times)
+
+                        print(f'Forward batch: {forward_b_time} / example: {forward_b_time / batch_size}')
+                        print(f'Backward batch: {backward_b_time} / example: {backward_b_time / batch_size}')
+                        print(f'Optim batch: {optim_b_time} / example: {optim_b_time / batch_size}')
+                        print(f'Board batch: {board_b_time} / example: {board_b_time / batch_size}')
+                        print(f'Callbacks batch: {callbacks_b_time} / example: {callbacks_b_time / batch_size}')
+
+                if self.debug_timing and 100 < i < 200:
+                    pre_forward_time = datetime.timestamp(datetime.now())
+
                 self.total_steps += 1
                 self.epoch_steps = base_batch_idx + i + 1
                 accumulated_tokens += batch['attention_mask'].sum()
@@ -426,10 +455,18 @@ class IterativeJointLMTrainer(JointLMTrainer):
                 self.accumulated_loss += loss
                 loss = loss / self.gradient_accumulation_steps
 
+                if self.debug_timing and 100 < i < 200:
+                    forward_time = datetime.timestamp(datetime.now())
+                    forward_times.append(forward_time - pre_forward_time)
+
                 if self.use_amp and scaler is not None:
                     scaler.scale(loss).backward()
                 else:
                     loss.backward()
+
+                if self.debug_timing and 100 < i < 200:
+                    backward_time = datetime.timestamp(datetime.now())
+                    backward_times.append(backward_time - forward_time)
 
                 self.optimizer_step_count += 1
                 if self.optimizer_step_count % self.gradient_accumulation_steps == 0:
@@ -447,6 +484,10 @@ class IterativeJointLMTrainer(JointLMTrainer):
 
                     if scheduler is not None:
                         scheduler.step()
+
+                    if self.debug_timing and 100 < i < 200:
+                        optim_time = datetime.timestamp(datetime.now())
+                        optim_times.append(optim_time - backward_time)
 
                     if self.writer and self.total_steps % self.tensorboard_interval == 0:
                         loss_item = (self.accumulated_loss / self.gradient_accumulation_steps).item()
@@ -477,7 +518,15 @@ class IterativeJointLMTrainer(JointLMTrainer):
                     self.accumulated_loss = torch.tensor(0.0, device=self.device)
                     self.optimizer_step_count = 0
 
+                    if self.debug_timing and 100 < i < 200:
+                        board_time = datetime.timestamp(datetime.now())
+                        board_times.append(board_time - optim_time)
+
                 for callback in self.callbacks:
                     should_stop = callback.on_batch_end(self.model, self.epoch_steps, loss, batch)
                     if should_stop:
                         self.is_running = False
+
+                if self.debug_timing and 100 < i < 200:
+                    callbacks_time = datetime.timestamp(datetime.now())
+                    callbacks_times.append(callbacks_time - board_time)
