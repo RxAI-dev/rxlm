@@ -155,6 +155,13 @@ def compile_moe_expert_weights(model: nn.Module, config: CompileConfig = None) -
                     fullgraph=config.fullgraph,
                     dynamic=config.dynamic,
                 )
+
+                child._compute_shared_experts = torch.compile(
+                    child._compute_shared_experts,
+                    mode=config.mode,
+                    fullgraph=config.fullgraph,
+                    dynamic=config.dynamic,
+                )
             else:
                 _compile_moe(child)
 

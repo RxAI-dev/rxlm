@@ -62,29 +62,27 @@ class MoeRouter(nn.Module):
 
     def calculate_aux_loss(self, top_k_indices: torch.Tensor, probs: torch.Tensor) -> torch.Tensor:
         # Get shapes
-        T, K = top_k_indices.size()  # Batch * Sequence length, Top-K
+        T, K = top_k_indices.size()
+        flat_indices = top_k_indices.view(-1)  # [T*K]
 
-        # 1. Compute expert selection mask (one-hot encoded)
-        expert_mask = F.one_hot(top_k_indices, self.num_experts).to(dtype=probs.dtype)  # (B*S, K, E)
+        # 1. Compute expert usage
+        expert_usage = torch.zeros(self.num_experts, device=flat_indices.device, dtype=probs.dtype)
+        expert_usage.scatter_add_(0, flat_indices, torch.ones_like(flat_indices, dtype=probs.dtype))
 
-        # 2. Total number of times each expert is selected
-        expert_usage = expert_mask.sum(dim=(0, 1))  # (E,)
-
-        # 3. Fraction of tokens assigned to each expert
+        # 2. Get fraction of tokens assigned to each expert
         total_selections = T * K
-        fraction_expert = expert_usage / (total_selections + 1e-6)  # (E,)
+        fraction_expert = expert_usage / (total_selections + 1e-6)
 
-        # 4. Sum of probabilities for each expert's selected tokens
-        probs_expanded = probs.unsqueeze(1).expand(-1, K, -1)  # (B_K, K, E)
-        sum_probs = (probs_expanded * expert_mask).sum(dim=(0, 1))
+        # 3. Sum probabilities for each expert's selected tokens
+        flat_probs = probs.gather(1, top_k_indices).view(-1)  # [T*K] - selected experts probs
+        sum_probs = torch.zeros(self.num_experts, device=flat_indices.device, dtype=probs.dtype)
+        sum_probs.scatter_add_(0, flat_indices, flat_probs)
 
-        # 5. Average probability per expert (avoid division by zero)
-        avg_probs = sum_probs / expert_usage.clamp(min=1e-6)  # (E,)
+        # 4. Calculate average probability per expert
+        avg_probs = sum_probs / expert_usage.clamp(min=1e-6)
 
-        # 6. Compute load balancing loss
-        loss = (fraction_expert * avg_probs).sum() * self.num_experts
-
-        return loss
+        # 5. Final aux loss
+        return (fraction_expert * avg_probs).sum() * self.num_experts
 
     def forward(self, x: torch.Tensor):
         # Input shape: [batch*seq_len, embed_dim]
@@ -408,22 +406,29 @@ class VectorizedMoeFeedForward(nn.Module):
         """Initialize stacked expert weights for basic feedforward."""
         # fc1: embed_dim -> hidden_dim, so weight is [hidden_dim, embed_dim]
         # For BMM we need [num_experts, embed_dim, hidden_dim] (transposed)
-        self.w1 = nn.Parameter(torch.randn(self.num_experts, self.embed_dim, self.hidden_dim) * 0.02)
-
-        if self.bias_mode == 'local':
-            self.b1 = nn.Parameter(torch.zeros(self.num_experts, self.hidden_dim))
+        w1 = torch.randn(self.num_experts, self.embed_dim, self.hidden_dim) * 0.02
+        b1 = torch.zeros(self.num_experts, self.hidden_dim) if self.bias_mode == 'local' else None
 
         # fc2: hidden_dim -> embed_dim, so weight is [embed_dim, hidden_dim]
         # For BMM we need [num_experts, hidden_dim, embed_dim] (transposed)
-        self.w2 = nn.Parameter(torch.randn(self.num_experts, self.hidden_dim, self.embed_dim) * 0.02)
-        if self.bias_mode == 'local':
-            self.b2 = nn.Parameter(torch.zeros(self.num_experts, self.embed_dim))
+        w2 = torch.randn(self.num_experts, self.hidden_dim, self.embed_dim) * 0.02
+        b2 = torch.zeros(self.num_experts, self.embed_dim) if self.bias_mode == 'local' else None
+
+        if self.use_grouped_gemm:
+            self.w1 = nn.Parameter(w1.to(dtype=torch.bfloat16))
+            self.w2 = nn.Parameter(w2.to(dtype=torch.bfloat16))
+            if self.bias_mode == 'local':
+                self.b1 = nn.Parameter(b1.to(dtype=torch.bfloat16))
+                self.b2 = nn.Parameter(b2.to(dtype=torch.bfloat16))
+        else:
+            self.w1 = nn.Parameter(w1)
+            self.w2 = nn.Parameter(w2)
+            if self.bias_mode == 'local':
+                self.b1 = nn.Parameter(b1)
+                self.b2 = nn.Parameter(b2)
 
         if self.bias_mode == 'global':
             self.global_bias = nn.Parameter(torch.zeros(self.embed_dim))
-
-        if self.shared_experts_bias_mode == 'global':
-            self.shared_experts_bias = nn.Parameter(torch.zeros(self.embed_dim))
 
     def _init_legacy_experts(self, from_legacy: bool):
         """Initialize legacy ModuleList experts if from_legacy=True."""
@@ -438,15 +443,22 @@ class VectorizedMoeFeedForward(nn.Module):
     def _init_shared_experts(self):
         """Initialize shared experts (always as ModuleList)."""
         if self.num_shared_experts > 0:
-            self.shared_experts = nn.ModuleList([
-                FeedForward(self.embed_dim, self.hidden_dim, self.activation, self.dropout_p, use_bias=self.shared_experts_bias_mode == 'local')
-                for _ in range(self.num_shared_experts)
-            ])
+            if self.num_shared_experts == 1:
+                self.shared_expert = FeedForward(self.embed_dim, self.hidden_dim, self.activation, self.dropout_p, use_bias=self.shared_experts_bias_mode == 'local')
+            elif self.num_shared_experts > 1:
+                self.shared_w1 = nn.Parameter(torch.randn(self.num_shared_experts, self.embed_dim, self.hidden_dim) * 0.02)
+                self.shared_w2 = nn.Parameter(torch.randn(self.num_shared_experts, self.hidden_dim, self.embed_dim) * 0.02)
 
-            if self.num_shared_experts > 1:
+                if self.shared_experts_bias_mode == 'local':
+                    self.shared_b1 = nn.Parameter(torch.zeros(self.num_shared_experts, self.hidden_dim))
+                    self.shared_b2 = nn.Parameter(torch.zeros(self.num_shared_experts, self.embed_dim))
+
                 self.shared_expert_gate = nn.Linear(self.embed_dim, self.num_shared_experts, bias=False)
                 # For shared expert gate load balancing
                 self.register_buffer('shared_gate_loss', torch.tensor(0.0), persistent=False)
+
+            if self.shared_experts_bias_mode == 'global':
+                self.shared_experts_bias = nn.Parameter(torch.zeros(self.embed_dim))
 
     def load_weights_from_legacy(self):
         """Transfer weights from legacy ModuleList experts to stacked tensors, then free legacy memory."""
@@ -473,6 +485,37 @@ class VectorizedMoeFeedForward(nn.Module):
         if self.num_shared_experts > 1:
             return self.router.aux_loss + self.shared_gate_loss
         return self.router.aux_loss
+
+    def _compute_shared_experts(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [num_tokens, embed_dim]
+        # Expand for BMM: [num_shared, num_tokens, embed_dim]
+        x_expanded = x.unsqueeze(0).expand(self.num_shared_experts, -1, -1)
+
+        # FC1
+        hidden = torch.bmm(x_expanded, self.shared_w1)  # [S, T, H]
+        if self.shared_experts_bias_mode == 'local':
+            hidden = hidden + self.shared_b1.unsqueeze(1)  # Add bias
+
+        hidden = self.activation(hidden)
+
+        # Dropout
+        if self.dropout is not None:
+            hidden = self.dropout(hidden)
+
+        # FC2
+        output = torch.bmm(hidden, self.shared_w2)  # [S, T, D]
+        if self.shared_experts_bias_mode == 'local':
+            output = output + self.shared_b2.unsqueeze(1)  # Add bias
+
+        # Apply gating weights
+        gate_logits = self.shared_expert_gate(x)  # [T, S]
+        weights = F.softmax(gate_logits, dim=-1)  # [T, S]
+
+        if self.training:
+            self.shared_gate_loss = torch.abs(weights - (1 / self.num_shared_experts)).mean()
+
+        # Weighted sum: [S, T, D] * [T, S, 1] -> sum -> [T, D]
+        return (output.permute(1, 0, 2) * weights.unsqueeze(-1)).sum(dim=1)
 
     def _apply_expert_weights(self, padded_input: torch.Tensor) -> torch.Tensor:
         """
@@ -549,7 +592,7 @@ class VectorizedMoeFeedForward(nn.Module):
 
         # FC1: [total_tokens, embed_dim] @ [E, embed_dim, hidden_dim] -> [total_tokens, hidden_dim]
         tokens_per_expert = tokens_per_expert.cpu().detach().to(dtype=torch.long)
-        hidden = gg.ops.gmm(dispatched_x.to(dtype=torch.bfloat16), self.w1.to(dtype=torch.bfloat16), tokens_per_expert, trans_b=False)
+        hidden = gg.ops.gmm(dispatched_x.to(dtype=torch.bfloat16), self.w1, tokens_per_expert, trans_b=False)
         if self.bias_mode == 'local':
             hidden = hidden + self._expand_bias(self.b1, tokens_per_expert)
         hidden = self.activation(hidden)
@@ -636,14 +679,13 @@ class VectorizedMoeFeedForward(nn.Module):
         # Select weights and biases for active experts using advanced indexing
         # [num_experts, embed_dim, hidden_dim] -> [top_k, embed_dim, hidden_dim]
         w1_selected = self.w1[selected_experts]  # [top_k, embed_dim, hidden_dim]
+        w2_selected = self.w2[selected_experts]  # [top_k, hidden_dim, embed_dim]
+
         if self.bias_mode == 'local':
             b1_selected = self.b1[selected_experts]  # [top_k, hidden_dim]
-        else:
-            b1_selected = None
-        w2_selected = self.w2[selected_experts]  # [top_k, hidden_dim, embed_dim]
-        if self.bias_mode == 'local':
             b2_selected = self.b2[selected_experts]  # [top_k, embed_dim]
         else:
+            b1_selected = None
             b2_selected = None
 
         # Expand single token for batched computation: [1, embed_dim] -> [top_k, 1, embed_dim]
@@ -729,17 +771,17 @@ class VectorizedMoeFeedForward(nn.Module):
                     dispatched_x, sorted_expert_indices, tokens_per_expert, starts
                 )
 
-            # === STEP 5: REVERSE PERMUTATION AND COMBINE RESULTS ===
+            # === STEP 5: EXPERTS WEIGHTING ===
             if self.use_weighted_shared_experts:
                 permuted_routing_weights = permuted_routing_weights * (self.top_k / (self.top_k + self.num_shared_experts))
 
             weighted_outputs = concatenated_outputs * permuted_routing_weights.unsqueeze(1)
 
+            # === STEP 6: REVERSE PERMUTATION AND COMBINE RESULTS ===
             final_output = torch.zeros_like(x)
-            inverse_sorted_order = sorted_order.argsort(0)
-            unpermuted_outputs = weighted_outputs[inverse_sorted_order]
             scatter_indices = token_indices.unsqueeze(1).expand(-1, embed_dim)
-            final_output.scatter_add_(0, scatter_indices, unpermuted_outputs.to(dtype=final_output.dtype))
+            permuted_scatter_indices = scatter_indices[sorted_order]
+            final_output.scatter_add_(0, permuted_scatter_indices, weighted_outputs.to(dtype=final_output.dtype))
 
         if self.bias_mode == 'global':
             final_output = final_output + self.global_bias.unsqueeze(0)
@@ -747,18 +789,9 @@ class VectorizedMoeFeedForward(nn.Module):
         # Add shared expert outputs (if any) - keep same as original
         if self.num_shared_experts > 0:
             if self.num_shared_experts == 1:
-                shared_combined = self.shared_experts[0](x)
+                shared_combined = self.shared_expert(x)
             else:
-                shared_gate_logits = self.shared_expert_gate(x)
-                shared_weights = F.softmax(shared_gate_logits, dim=-1)
-
-                if self.training:
-                    self.shared_gate_loss = torch.abs(shared_weights - (1 / self.num_shared_experts)).mean()
-
-                shared_outputs = torch.stack([
-                    expert(x) for expert in self.shared_experts
-                ], dim=1)
-                shared_combined = (shared_outputs * shared_weights.unsqueeze(-1)).sum(dim=1)
+                shared_combined = self._compute_shared_experts(x)
 
             if self.shared_experts_bias_mode == 'global':
                 shared_combined = shared_combined + self.shared_experts_bias.unsqueeze(0)
@@ -780,48 +813,28 @@ class VectorizedGatedMoeFeedForward(VectorizedMoeFeedForward):
         # fc1 (GatedLinearUnit): embed_dim -> hidden_dim * 2, so weight is [hidden_dim * 2, embed_dim]
         # For BMM we need [num_experts, embed_dim, hidden_dim * 2] (transposed)
         w1 = torch.randn(self.num_experts, self.embed_dim, self.hidden_dim * 2) * 0.02
-        if self.bias_mode == 'local':
-            b1 = torch.zeros(self.num_experts, self.hidden_dim * 2)
-        else:
-            b1 = None
+        b1 = torch.zeros(self.num_experts, self.hidden_dim * 2) if self.bias_mode == 'local' else None
 
         # fc2: hidden_dim -> embed_dim, so weight is [embed_dim, hidden_dim]
         # For BMM we need [num_experts, hidden_dim, embed_dim] (transposed)
         w2 = torch.randn(self.num_experts, self.hidden_dim, self.embed_dim) * 0.02
-        if self.bias_mode == 'local':
-            b2 = torch.zeros(self.num_experts, self.embed_dim)
-        else:
-            b2 = None
+        b2 = torch.zeros(self.num_experts, self.embed_dim) if self.bias_mode == 'local' else None
 
         if self.use_grouped_gemm:
             self.w1 = nn.Parameter(w1.to(dtype=torch.bfloat16))
-            if self.bias_mode == 'local':
-                self.b1 = nn.Parameter(b1.to(dtype=torch.bfloat16))
             self.w2 = nn.Parameter(w2.to(dtype=torch.bfloat16))
             if self.bias_mode == 'local':
+                self.b1 = nn.Parameter(b1.to(dtype=torch.bfloat16))
                 self.b2 = nn.Parameter(b2.to(dtype=torch.bfloat16))
         else:
             self.w1 = nn.Parameter(w1)
-            if self.bias_mode == 'local':
-                self.b1 = nn.Parameter(b1)
             self.w2 = nn.Parameter(w2)
             if self.bias_mode == 'local':
+                self.b1 = nn.Parameter(b1)
                 self.b2 = nn.Parameter(b2)
 
         if self.bias_mode == 'global':
-            gb = torch.zeros(self.embed_dim)
-            # if self.use_grouped_gemm:
-            #     self.global_bias = nn.Parameter(gb.to(dtype=torch.bfloat16))
-            # else:
-            self.global_bias = nn.Parameter(gb)
-
-        if self.shared_experts_bias_mode == 'global':
-            sb = torch.zeros(self.embed_dim)
-            if self.use_grouped_gemm:
-                self.shared_experts_bias = nn.Parameter(sb.to(dtype=torch.bfloat16))
-            else:
-                self.shared_experts_bias = nn.Parameter(sb)
-
+            self.global_bias = nn.Parameter(torch.zeros(self.embed_dim))
 
     def _init_legacy_experts(self, from_legacy: bool):
         """Initialize legacy ModuleList experts with GatedFeedForward."""
@@ -835,14 +848,28 @@ class VectorizedGatedMoeFeedForward(VectorizedMoeFeedForward):
 
     def _init_shared_experts(self):
         """Initialize shared experts with GatedFeedForward."""
+        """Initialize shared experts (always as ModuleList)."""
         if self.num_shared_experts > 0:
-            self.shared_experts = nn.ModuleList([
-                GatedFeedForward(self.embed_dim, self.hidden_dim, self.activation, self.dropout_p, use_bias=self.shared_experts_bias_mode == 'local')
-                for _ in range(self.num_shared_experts)
-            ])
+            if self.num_shared_experts == 1:
+                self.shared_expert = GatedFeedForward(
+                    self.embed_dim, self.hidden_dim, self.activation, self.dropout_p,
+                    use_bias=self.shared_experts_bias_mode == 'local'
+                )
+            elif self.num_shared_experts > 1:
+                self.shared_w1 = nn.Parameter(torch.randn(self.num_shared_experts, self.embed_dim, self.hidden_dim * 2) * 0.02)
+                self.shared_w2 = nn.Parameter(torch.randn(self.num_shared_experts, self.hidden_dim, self.embed_dim) * 0.02)
 
-            if self.num_shared_experts > 1:
+                if self.shared_experts_bias_mode == 'local':
+                    self.shared_b1 = nn.Parameter(torch.zeros(self.num_shared_experts, self.hidden_dim * 2))
+                    self.shared_b2 = nn.Parameter(torch.zeros(self.num_shared_experts, self.embed_dim))
+
                 self.shared_expert_gate = nn.Linear(self.embed_dim, self.num_shared_experts, bias=False)
+                # For shared expert gate load balancing
+                self.register_buffer('shared_gate_loss', torch.tensor(0.0), persistent=False)
+
+            if self.shared_experts_bias_mode == 'global':
+                self.shared_experts_bias = nn.Parameter(torch.zeros(self.embed_dim))
+
 
     def load_weights_from_legacy(self):
         """Transfer weights from legacy gated experts to stacked tensors, then free legacy memory."""
@@ -864,6 +891,38 @@ class VectorizedGatedMoeFeedForward(VectorizedMoeFeedForward):
         del self.experts
         self.experts = None
         torch.cuda.empty_cache()
+
+    def _compute_shared_experts(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [num_tokens, embed_dim]
+        # Expand for BMM: [num_shared, num_tokens, embed_dim]
+        x_expanded = x.unsqueeze(0).expand(self.num_shared_experts, -1, -1)
+
+        # FC1 GLU
+        gated = torch.bmm(x_expanded, self.shared_w1)  # [S, T, 2H]
+        if self.shared_experts_bias_mode == 'local':
+            gated = gated + self.shared_b1.unsqueeze(1)  # Add bias
+
+        l, g = gated.chunk(2, dim=-1)
+        hidden = l * self.activation(g)
+
+        # Dropout
+        if self.dropout is not None:
+            hidden = self.dropout(hidden)
+
+        # FC2
+        output = torch.bmm(hidden, self.shared_w2)  # [S, T, D]
+        if self.shared_experts_bias_mode == 'local':
+            output = output + self.shared_b2.unsqueeze(1)  # Add bias
+
+        # Apply gating weights
+        gate_logits = self.shared_expert_gate(x)  # [T, S]
+        weights = F.softmax(gate_logits, dim=-1)  # [T, S]
+
+        if self.training:
+            self.shared_gate_loss = torch.abs(weights - (1 / self.num_shared_experts)).mean()
+
+        # Weighted sum: [S, T, D] * [T, S, 1] -> sum -> [T, D]
+        return (output.permute(1, 0, 2) * weights.unsqueeze(-1)).sum(dim=1)
 
     def _apply_expert_weights(self, padded_input: torch.Tensor) -> torch.Tensor:
         """
