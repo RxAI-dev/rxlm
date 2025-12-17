@@ -31,6 +31,7 @@ class ClassicTransformerLayer(nn.Module):
             moe_bias_mode: Literal['global', 'local', 'off'] = 'global',
             moe_shared_experts_bias_mode: Literal['global', 'local', 'off'] = 'local',
             moe_use_weighted_shared_experts: bool = False,
+            moe_use_cutlass_grouped_gemm: bool = True,
             *args,
             **kwargs,
     ):
@@ -47,7 +48,8 @@ class ClassicTransformerLayer(nn.Module):
                         router_amp=router_amp, router_dtype=router_dtype, from_legacy=vectorized_moe_from_legacy,
                         use_grouped_gemm=moe_grouped_gemm, bias_mode=moe_bias_mode,
                         shared_experts_bias_mode=moe_shared_experts_bias_mode,
-                        use_weighted_shared_experts=moe_use_weighted_shared_experts
+                        use_weighted_shared_experts=moe_use_weighted_shared_experts,
+                        use_cutlass_grouped_gemm=moe_use_cutlass_grouped_gemm,
                     )
                 else:
                     self.ff = GatedMoeFeedForward(embed_dim, ff_dim, num_experts, ff_activation, top_k=moe_top_k,
@@ -64,7 +66,8 @@ class ClassicTransformerLayer(nn.Module):
                         router_amp=router_amp, router_dtype=router_dtype, from_legacy=vectorized_moe_from_legacy,
                         use_grouped_gemm=moe_grouped_gemm, bias_mode=moe_bias_mode,
                         shared_experts_bias_mode=moe_shared_experts_bias_mode,
-                        use_weighted_shared_experts=moe_use_weighted_shared_experts
+                        use_weighted_shared_experts=moe_use_weighted_shared_experts,
+                        use_cutlass_grouped_gemm=moe_use_cutlass_grouped_gemm,
                     )
                 else:
                     self.ff = MoeFeedForward(embed_dim, ff_dim, num_experts, ff_activation, top_k=moe_top_k,

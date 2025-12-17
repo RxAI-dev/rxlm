@@ -48,9 +48,11 @@ class RxTComponentConfig(TypedDict):
     init_identity_norm: Optional[bool]
     skip_memory_cross_attention: Optional[bool]
     stateless_layers_config: Optional[list[Literal['dense', 'moe']]]
+    final_stateless_layers_config: Optional[list[Literal['dense', 'moe']]]
     dense_layer_dim: Optional[int]
     attn_layer_types: Optional[list[str]]
     stateless_attn_layer_types: Optional[list[str]]
+    final_stateless_attn_layer_types: list[str]
     linear_attn_mode: Optional[str]
     linear_attn_expand_k: Optional[float]
     linear_attn_expand_v: Optional[float]
@@ -74,6 +76,7 @@ class RxTComponentConfig(TypedDict):
     use_gated_cross_attention: Optional[bool]
     use_attention_output_bias: Optional[bool] # legacy compat
     legacy_stm_in_encoder: Optional[bool] # legacy compat
+    moe_use_cutlass_grouped_gemm: Optional[bool]
 
 class RxTComponentBase(nn.Module):
     """Base class for RxT-Alpha (Reactive Transformer) components (encoder and decoder)"""
@@ -108,9 +111,11 @@ class RxTComponentBase(nn.Module):
             init_identity_norm: bool = False,
             skip_memory_cross_attention: bool = False,
             stateless_layers_config: list[Literal['dense', 'moe']] = None,
+            final_stateless_layers_config: list[Literal['dense', 'moe']] = None,
             dense_layer_dim: int = 1536,
             attn_layer_types: list[str] = None,
             stateless_attn_layer_types: list[str] = None,
+            final_stateless_attn_layer_types: list[str] = None,
             linear_attn_mode: str = 'chunk',
             linear_attn_expand_k: float = 0.5,
             linear_attn_expand_v: float = 1.0,
@@ -134,6 +139,7 @@ class RxTComponentBase(nn.Module):
             use_gated_cross_attention: bool = None,
             use_attention_output_bias: bool = True, # legacy compat
             legacy_stm_in_encoder: bool = False, # legacy compat
+            moe_use_cutlass_grouped_gemm: bool = True,
             **kwargs
     ):
         super(RxTComponentBase, self).__init__(**kwargs)
@@ -190,9 +196,12 @@ class RxTComponentBase(nn.Module):
             )
 
 
-            if stateless_layers_config is not None:
-                def stateless_layer_init(layer_type: Literal['dense', 'moe'], layer_idx: int):
-                    attn_type = stateless_attn_layer_types[layer_idx] if self_att_type == 'hybrid' else self_att_type
+            if stateless_layers_config is not None or final_stateless_layers_config is not None:
+                def stateless_layer_init(layer_type: Literal['dense', 'moe'], layer_idx: int, is_final: bool = False):
+                    if is_final:
+                        attn_type = final_stateless_attn_layer_types[layer_idx] if self_att_type == 'hybrid' else self_att_type
+                    else:
+                        attn_type = stateless_attn_layer_types[layer_idx] if self_att_type == 'hybrid' else self_att_type
 
                     if layer_type == 'dense':
                         return ReactiveTransformerLayer(
@@ -230,13 +239,27 @@ class RxTComponentBase(nn.Module):
                             moe_bias_mode=moe_bias_mode,
                             moe_shared_experts_bias_mode=moe_shared_experts_bias_mode,
                             moe_use_weighted_shared_experts=moe_use_weighted_shared_experts,
+                            moe_use_cutlass_grouped_gemm=moe_use_cutlass_grouped_gemm,
                         )
 
-                stateless_layers = nn.ModuleList([
-                    stateless_layer_init(layer_type, layer_idx) for layer_idx, layer_type in enumerate(stateless_layers_config)
-                ])
+                if stateless_layers_config is not None:
+                    stateless_layers = nn.ModuleList([
+                        stateless_layer_init(layer_type, layer_idx) for layer_idx, layer_type in enumerate(stateless_layers_config)
+                    ])
+                else:
+                    stateless_layers = None
+
+                if final_stateless_layers_config is not None:
+                    final_stateless_layers = nn.ModuleList([
+                        stateless_layer_init(
+                            layer_type, layer_idx + num_layers + len(stateless_layers_config) if stateless_layers_config is not None else 0, True
+                        ) for layer_idx, layer_type in enumerate(final_stateless_layers_config)
+                    ])
+                else:
+                    final_stateless_layers = None
             else:
                 stateless_layers = None
+                final_stateless_layers = None
 
             num_stateless_layers = len(stateless_layers_config) if stateless_layers_config is not None else 0
             get_attn_type = lambda idx: attn_layer_types[idx] if self_att_type == 'hybrid' else self_att_type
@@ -264,6 +287,7 @@ class RxTComponentBase(nn.Module):
                     moe_bias_mode=moe_bias_mode,
                     moe_shared_experts_bias_mode=moe_shared_experts_bias_mode,
                     moe_use_weighted_shared_experts=moe_use_weighted_shared_experts,
+                    moe_use_cutlass_grouped_gemm=moe_use_cutlass_grouped_gemm,
                 ) for i in range(num_layers)
             ])
         else:
@@ -290,20 +314,26 @@ class RxTComponentBase(nn.Module):
                     moe_bias_mode=moe_bias_mode,
                     moe_shared_experts_bias_mode=moe_shared_experts_bias_mode,
                     moe_use_weighted_shared_experts=moe_use_weighted_shared_experts,
+                    moe_use_cutlass_grouped_gemm=moe_use_cutlass_grouped_gemm,
                 ) for i in range(num_layers)
             ])
             stateless_layers = None
+            final_stateless_layers = None
 
         self.model = self._init_model(
             stm, layers, embedding, use_flash_attention, embed_dim, vocab_size, use_moe,
             use_head_norm=use_head_norm, init_identity_norm=init_identity_norm,
             stateless_layers=stateless_layers, head_norm_type=head_norm_type,
+            final_stateless_layers=final_stateless_layers,
         )
 
-    def _init_model(self, stm: Union[ShortTermMemory, None], layers: nn.ModuleList, embedding: nn.Embedding,
-                    use_flash_attention: bool, embed_dim: int, vocab_size: int, use_moe: bool,
-                    use_head_norm: bool = False, init_identity_norm: bool = False,
-                    stateless_layers: nn.ModuleList = None, head_norm_type: str = 'layer_norm') -> ReactiveTransformerBase:
+    def _init_model(
+            self, stm: Union[ShortTermMemory, None], layers: nn.ModuleList, embedding: nn.Embedding,
+            use_flash_attention: bool, embed_dim: int, vocab_size: int, use_moe: bool,
+            use_head_norm: bool = False, init_identity_norm: bool = False,
+            stateless_layers: nn.ModuleList = None, head_norm_type: str = 'layer_norm',
+            final_stateless_layers: nn.ModuleList = None
+    ) -> ReactiveTransformerBase:
         pass
 
     def params_count(self):
@@ -379,7 +409,8 @@ class RxTEncoderComponent(RxTComponentBase):
             use_head_norm: bool = False,
             init_identity_norm: bool = False,
             stateless_layers: nn.ModuleList = None,
-            head_norm_type: str = 'layer_norm'
+            head_norm_type: str = 'layer_norm',
+            final_stateless_layers: nn.ModuleList = None
     ) -> ReactiveTransformerEncoder:
         return ReactiveTransformerEncoder(
             stm=stm,
@@ -411,7 +442,8 @@ class RxTDecoderComponent(RxTComponentBase):
             use_head_norm: bool = False,
             init_identity_norm: bool = False,
             stateless_layers: nn.ModuleList = None,
-            head_norm_type: str = 'layer_norm'
+            head_norm_type: str = 'layer_norm',
+            final_stateless_layers: nn.ModuleList = None
     ) -> ReactiveTransformerDecoder:
         return ReactiveTransformerDecoder(
             embed_dim,
@@ -424,6 +456,7 @@ class RxTDecoderComponent(RxTComponentBase):
             use_head_norm=use_head_norm,
             init_identity_norm=init_identity_norm,
             stateless_layers=stateless_layers,
+            final_stateless_layers=final_stateless_layers,
             head_norm_type=head_norm_type,
         )
 

@@ -94,6 +94,7 @@ class DecoderOnlyTransformer(nn.Module, PyTorchModelHubMixin, pipeline_tag="text
             use_gated_attention: bool = False,
             gated_attention_activation: str = 'sigmoid',
             use_attention_output_bias: bool = True,  # legacy compat
+            moe_use_cutlass_grouped_gemm: bool = True,
             **kwargs
     ):
         super(DecoderOnlyTransformer, self).__init__(**kwargs)
@@ -156,7 +157,8 @@ class DecoderOnlyTransformer(nn.Module, PyTorchModelHubMixin, pipeline_tag="text
                     moe_grouped_gemm=moe_grouped_gemm,
                     moe_bias_mode=moe_bias_mode,
                     moe_shared_experts_bias_mode=moe_shared_experts_bias_mode,
-                    moe_use_weighted_shared_experts=moe_use_weighted_shared_experts
+                    moe_use_weighted_shared_experts=moe_use_weighted_shared_experts,
+                    moe_use_cutlass_grouped_gemm=moe_use_cutlass_grouped_gemm,
                 )
 
 

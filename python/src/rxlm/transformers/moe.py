@@ -361,6 +361,7 @@ class VectorizedMoeFeedForward(nn.Module):
             bias_mode: Literal['global', 'local', 'off'] = 'global',
             shared_experts_bias_mode: Literal['global', 'local', 'off'] = 'local',
             use_weighted_shared_experts: bool = False,
+            use_cutlass_grouped_gemm: bool = True,
             *args,
             **kwargs
     ):
@@ -378,7 +379,7 @@ class VectorizedMoeFeedForward(nn.Module):
         self.bias_mode = bias_mode
         self.shared_experts_bias_mode = shared_experts_bias_mode
         self.use_weighted_shared_experts = use_weighted_shared_experts
-        self.debug_step = 0
+        self.use_cutlass_grouped_gemm = use_cutlass_grouped_gemm
 
         # Warn if grouped_gemm requested but not available
         if use_grouped_gemm and not GROUPED_GEMM_AVAILABLE:
@@ -486,7 +487,7 @@ class VectorizedMoeFeedForward(nn.Module):
             return self.router.aux_loss + self.shared_gate_loss
         return self.router.aux_loss
 
-    def _compute_shared_experts(self, x: torch.Tensor) -> torch.Tensor:
+    def _compute_shared_experts(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         # x: [num_tokens, embed_dim]
         # Expand for BMM: [num_shared, num_tokens, embed_dim]
         x_expanded = x.unsqueeze(0).expand(self.num_shared_experts, -1, -1)
@@ -515,7 +516,7 @@ class VectorizedMoeFeedForward(nn.Module):
             self.shared_gate_loss = torch.abs(weights - (1 / self.num_shared_experts)).mean()
 
         # Weighted sum: [S, T, D] * [T, S, 1] -> sum -> [T, D]
-        return (output.permute(1, 0, 2) * weights.unsqueeze(-1)).sum(dim=1)
+        return (output.permute(1, 0, 2) * weights.unsqueeze(-1)).sum(dim=1), weights
 
     def _apply_expert_weights(self, padded_input: torch.Tensor) -> torch.Tensor:
         """
@@ -591,7 +592,11 @@ class VectorizedMoeFeedForward(nn.Module):
         # - With trans_b=False, gmm does: input @ weight per expert
 
         # FC1: [total_tokens, embed_dim] @ [E, embed_dim, hidden_dim] -> [total_tokens, hidden_dim]
-        tokens_per_expert = tokens_per_expert.cpu().detach().to(dtype=torch.long)
+        if self.use_cutlass_grouped_gemm:
+            tokens_per_expert = tokens_per_expert.detach().to(dtype=torch.long)
+        else:
+            tokens_per_expert = tokens_per_expert.cpu().detach().to(dtype=torch.long)
+
         hidden = gg.ops.gmm(dispatched_x.to(dtype=torch.bfloat16), self.w1, tokens_per_expert, trans_b=False)
         if self.bias_mode == 'local':
             hidden = hidden + self._expand_bias(self.b1, tokens_per_expert)
@@ -779,9 +784,10 @@ class VectorizedMoeFeedForward(nn.Module):
 
             # === STEP 6: REVERSE PERMUTATION AND COMBINE RESULTS ===
             final_output = torch.zeros_like(x)
+            inverse_sorted_order = sorted_order.argsort(0)
+            unpermuted_outputs = weighted_outputs[inverse_sorted_order]
             scatter_indices = token_indices.unsqueeze(1).expand(-1, embed_dim)
-            permuted_scatter_indices = scatter_indices[sorted_order]
-            final_output.scatter_add_(0, permuted_scatter_indices, weighted_outputs.to(dtype=final_output.dtype))
+            final_output.scatter_add_(0, scatter_indices, unpermuted_outputs.to(dtype=final_output.dtype))
 
         if self.bias_mode == 'global':
             final_output = final_output + self.global_bias.unsqueeze(0)
@@ -791,7 +797,9 @@ class VectorizedMoeFeedForward(nn.Module):
             if self.num_shared_experts == 1:
                 shared_combined = self.shared_expert(x)
             else:
-                shared_combined = self._compute_shared_experts(x)
+                shared_combined, shared_weights = self._compute_shared_experts(x)
+                if self.training:
+                    self.shared_gate_loss = torch.abs(shared_weights - (1 / self.num_shared_experts)).mean()
 
             if self.shared_experts_bias_mode == 'global':
                 shared_combined = shared_combined + self.shared_experts_bias.unsqueeze(0)
@@ -892,7 +900,7 @@ class VectorizedGatedMoeFeedForward(VectorizedMoeFeedForward):
         self.experts = None
         torch.cuda.empty_cache()
 
-    def _compute_shared_experts(self, x: torch.Tensor) -> torch.Tensor:
+    def _compute_shared_experts(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         # x: [num_tokens, embed_dim]
         # Expand for BMM: [num_shared, num_tokens, embed_dim]
         x_expanded = x.unsqueeze(0).expand(self.num_shared_experts, -1, -1)
@@ -918,11 +926,8 @@ class VectorizedGatedMoeFeedForward(VectorizedMoeFeedForward):
         gate_logits = self.shared_expert_gate(x)  # [T, S]
         weights = F.softmax(gate_logits, dim=-1)  # [T, S]
 
-        if self.training:
-            self.shared_gate_loss = torch.abs(weights - (1 / self.num_shared_experts)).mean()
-
         # Weighted sum: [S, T, D] * [T, S, 1] -> sum -> [T, D]
-        return (output.permute(1, 0, 2) * weights.unsqueeze(-1)).sum(dim=1)
+        return (output.permute(1, 0, 2) * weights.unsqueeze(-1)).sum(dim=1), weights
 
     def _apply_expert_weights(self, padded_input: torch.Tensor) -> torch.Tensor:
         """
@@ -972,7 +977,10 @@ class VectorizedGatedMoeFeedForward(VectorizedMoeFeedForward):
             [total_tokens, embed_dim] - expert outputs in same order as dispatched_x
         """
         x_bf16 = dispatched_x.to(dtype=torch.bfloat16)
-        tokens_per_expert = tokens_per_expert.cpu().detach().to(dtype=torch.long)
+        if self.use_cutlass_grouped_gemm:
+            tokens_per_expert = tokens_per_expert.detach().to(dtype=torch.long)
+        else:
+            tokens_per_expert = tokens_per_expert.cpu().detach().to(dtype=torch.long)
         # FC1 (Gated): [total_tokens, embed_dim] @ [E, embed_dim, hidden_dim * 2] -> [total_tokens, hidden_dim * 2]
         gated_hidden = gg.ops.gmm(x_bf16, self.w1, tokens_per_expert, trans_b=False)
         if self.bias_mode == 'local':

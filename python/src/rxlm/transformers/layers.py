@@ -34,6 +34,7 @@ class ReactiveTransformerLayer(nn.Module):
             moe_bias_mode: Literal['global', 'local', 'off'] = 'global',
             moe_shared_experts_bias_mode: Literal['global', 'local', 'off'] = 'local',
             moe_use_weighted_shared_experts: bool = False,
+            moe_use_cutlass_grouped_gemm: bool = True,
             *args,
             **kwargs,
     ):
@@ -56,7 +57,8 @@ class ReactiveTransformerLayer(nn.Module):
                         router_amp=router_amp, router_dtype=router_dtype, from_legacy=vectorized_moe_from_legacy,
                         use_grouped_gemm=moe_grouped_gemm, bias_mode=moe_bias_mode,
                         shared_experts_bias_mode=moe_shared_experts_bias_mode,
-                        use_weighted_shared_experts=moe_use_weighted_shared_experts
+                        use_weighted_shared_experts=moe_use_weighted_shared_experts,
+                        use_cutlass_grouped_gemm=moe_use_cutlass_grouped_gemm,
                     )
                 else:
                     self.ff = GatedMoeFeedForward(
@@ -75,7 +77,8 @@ class ReactiveTransformerLayer(nn.Module):
                         router_amp=router_amp, router_dtype=router_dtype, from_legacy=vectorized_moe_from_legacy,
                         use_grouped_gemm=moe_grouped_gemm, bias_mode=moe_bias_mode,
                         shared_experts_bias_mode=moe_shared_experts_bias_mode,
-                        use_weighted_shared_experts=moe_use_weighted_shared_experts
+                        use_weighted_shared_experts=moe_use_weighted_shared_experts,
+                        use_cutlass_grouped_gemm=moe_use_cutlass_grouped_gemm,
                     )
                 else:
                     self.ff = MoeFeedForward(

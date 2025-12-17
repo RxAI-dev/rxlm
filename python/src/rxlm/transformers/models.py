@@ -90,8 +90,10 @@ class ReactiveTransformerDecoder(ReactiveTransformerBase):
 
     def __init__(
             self, embed_dim: int, vocab_size: int, use_head_norm: bool = False,
-            init_identity_norm: bool = False, stateless_layers: nn.ModuleList = None,
-            head_norm_type: str = 'layer_norm', **kwargs):
+            init_identity_norm: bool = False, head_norm_type: str = 'layer_norm',
+            stateless_layers: nn.ModuleList = None, final_stateless_layers: nn.ModuleList = None,
+            **kwargs
+    ):
         super(ReactiveTransformerDecoder, self).__init__(**kwargs)
 
         self.head = nn.Linear(embed_dim, vocab_size)
@@ -109,11 +111,13 @@ class ReactiveTransformerDecoder(ReactiveTransformerBase):
         else:
             self.head_norm = None
         self.stateless_layers = stateless_layers
+        self.final_stateless_layers = final_stateless_layers
 
     def body_parameters(self) -> list[nn.Parameter]:
         layer_params = super().not_memory_parameters() + self.memory_parameters()
         stateless_params = [param for layer in self.stateless_layers for param in layer.parameters()]
-        return stateless_params + layer_params
+        final_stateless_params = [param for layer in self.final_stateless_layers for param in layer.parameters()] if self.final_stateless_layers is not None else []
+        return stateless_params + layer_params + final_stateless_params
 
     def head_parameters(self) -> list[nn.Parameter]:
         head_params = list(self.head.parameters())
@@ -123,19 +127,21 @@ class ReactiveTransformerDecoder(ReactiveTransformerBase):
 
     def not_memory_parameters(self) -> list[nn.Parameter]:
         layer_params = super().not_memory_parameters()
-        stateless_params = [param for layer in self.stateless_layers for param in layer.parameters()]
+        stateless_params = [param for layer in self.stateless_layers for param in layer.parameters()] if self.stateless_layers is not None else []
+        final_stateless_params = [param for layer in self.final_stateless_layers for param in layer.parameters()] if self.final_stateless_layers is not None else []
         head_params = list(self.head.parameters())
         if self.use_head_norm:
             head_params += list(self.head_norm.parameters())
-        return stateless_params + layer_params + head_params
+        return stateless_params + layer_params + head_params + final_stateless_params
 
     def active_parameters(self) -> list[nn.Parameter]:
         stateless = [param for layer in self.stateless_layers for param in layer.active_parameters()] if self.stateless_layers is not None else []
+        final_stateless = [param for layer in self.stateless_layers for param in layer.active_parameters()] if self.final_stateless_layers is not None else []
         head_params = list(self.head.parameters())
         if self.use_head_norm:
             head_params += list(self.head_norm.parameters())
         embed_params = list(self.embedding.parameters())
-        return super().active_parameters() + stateless + head_params + embed_params
+        return super().active_parameters() + stateless + head_params + embed_params + final_stateless
 
     def moe_router_loss(self):
         if self.use_moe:
@@ -209,6 +215,10 @@ class ReactiveTransformerDecoder(ReactiveTransformerBase):
         # Process own layers
         for i in range(self.num_own_layers):
             x = self._handle_layer(i, x, mask=mask, stm_kv_cache=stm_kv_cache, use_self_attn_cache=use_self_attn_cache, current_positions=current_positions)
+
+        if self.final_stateless_layers is not None:
+            for layer in self.final_stateless_layers:
+                x = layer(x, mask=mask, use_self_attn_cache=use_self_attn_cache, current_positions=current_positions)
 
         return self.head(self.head_norm(x) if self.use_head_norm else x)
 
