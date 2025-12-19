@@ -354,6 +354,7 @@ class VectorizedMoeFeedForward(nn.Module):
             top_k: int = 1,
             dropout: float = 0.0,
             num_shared_experts: int = 0,
+            shared_expert_dim: int = None,
             router_amp: bool = False,
             router_dtype: torch.dtype = torch.float32,
             from_legacy: bool = False,
@@ -380,6 +381,7 @@ class VectorizedMoeFeedForward(nn.Module):
         self.shared_experts_bias_mode = shared_experts_bias_mode
         self.use_weighted_shared_experts = use_weighted_shared_experts
         self.use_cutlass_grouped_gemm = use_cutlass_grouped_gemm
+        self.shared_expert_dim = shared_expert_dim if shared_expert_dim is not None else hidden_dim
 
         # Warn if grouped_gemm requested but not available
         if use_grouped_gemm and not GROUPED_GEMM_AVAILABLE:
@@ -445,13 +447,13 @@ class VectorizedMoeFeedForward(nn.Module):
         """Initialize shared experts (always as ModuleList)."""
         if self.num_shared_experts > 0:
             if self.num_shared_experts == 1:
-                self.shared_expert = FeedForward(self.embed_dim, self.hidden_dim, self.activation, self.dropout_p, use_bias=self.shared_experts_bias_mode == 'local')
+                self.shared_expert = FeedForward(self.embed_dim, self.shared_expert_dim, self.activation, self.dropout_p, use_bias=self.shared_experts_bias_mode == 'local')
             elif self.num_shared_experts > 1:
-                self.shared_w1 = nn.Parameter(torch.randn(self.num_shared_experts, self.embed_dim, self.hidden_dim) * 0.02)
-                self.shared_w2 = nn.Parameter(torch.randn(self.num_shared_experts, self.hidden_dim, self.embed_dim) * 0.02)
+                self.shared_w1 = nn.Parameter(torch.randn(self.num_shared_experts, self.embed_dim, self.shared_expert_dim) * 0.02)
+                self.shared_w2 = nn.Parameter(torch.randn(self.num_shared_experts, self.shared_expert_dim, self.embed_dim) * 0.02)
 
                 if self.shared_experts_bias_mode == 'local':
-                    self.shared_b1 = nn.Parameter(torch.zeros(self.num_shared_experts, self.hidden_dim))
+                    self.shared_b1 = nn.Parameter(torch.zeros(self.num_shared_experts, self.shared_expert_dim))
                     self.shared_b2 = nn.Parameter(torch.zeros(self.num_shared_experts, self.embed_dim))
 
                 self.shared_expert_gate = nn.Linear(self.embed_dim, self.num_shared_experts, bias=False)
@@ -860,15 +862,15 @@ class VectorizedGatedMoeFeedForward(VectorizedMoeFeedForward):
         if self.num_shared_experts > 0:
             if self.num_shared_experts == 1:
                 self.shared_expert = GatedFeedForward(
-                    self.embed_dim, self.hidden_dim, self.activation, self.dropout_p,
+                    self.embed_dim, self.shared_expert_dim, self.activation, self.dropout_p,
                     use_bias=self.shared_experts_bias_mode == 'local'
                 )
             elif self.num_shared_experts > 1:
-                self.shared_w1 = nn.Parameter(torch.randn(self.num_shared_experts, self.embed_dim, self.hidden_dim * 2) * 0.02)
-                self.shared_w2 = nn.Parameter(torch.randn(self.num_shared_experts, self.hidden_dim, self.embed_dim) * 0.02)
+                self.shared_w1 = nn.Parameter(torch.randn(self.num_shared_experts, self.embed_dim, self.shared_expert_dim * 2) * 0.02)
+                self.shared_w2 = nn.Parameter(torch.randn(self.num_shared_experts, self.shared_expert_dim, self.embed_dim) * 0.02)
 
                 if self.shared_experts_bias_mode == 'local':
-                    self.shared_b1 = nn.Parameter(torch.zeros(self.num_shared_experts, self.hidden_dim * 2))
+                    self.shared_b1 = nn.Parameter(torch.zeros(self.num_shared_experts, self.shared_expert_dim * 2))
                     self.shared_b2 = nn.Parameter(torch.zeros(self.num_shared_experts, self.embed_dim))
 
                 self.shared_expert_gate = nn.Linear(self.embed_dim, self.num_shared_experts, bias=False)

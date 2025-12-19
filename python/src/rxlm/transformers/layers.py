@@ -23,6 +23,7 @@ class ReactiveTransformerLayer(nn.Module):
             use_moe: bool = False,
             num_experts: int = 1,
             num_shared_experts: int = 0,
+            shared_expert_dim: int = None,
             moe_top_k: int = 1,
             use_vectorized_moe: bool = True,
             vectorized_moe_from_legacy: bool = False,
@@ -53,7 +54,7 @@ class ReactiveTransformerLayer(nn.Module):
                 if use_vectorized_moe:
                     self.ff = VectorizedGatedMoeFeedForward(
                         embed_dim, ff_dim, num_experts, ff_activation,
-                        top_k=moe_top_k, dropout=ff_dropout, num_shared_experts=num_shared_experts,
+                        top_k=moe_top_k, dropout=ff_dropout, num_shared_experts=num_shared_experts, shared_expert_dim=shared_expert_dim,
                         router_amp=router_amp, router_dtype=router_dtype, from_legacy=vectorized_moe_from_legacy,
                         use_grouped_gemm=moe_grouped_gemm, bias_mode=moe_bias_mode,
                         shared_experts_bias_mode=moe_shared_experts_bias_mode,
@@ -73,7 +74,7 @@ class ReactiveTransformerLayer(nn.Module):
                 if use_vectorized_moe:
                     self.ff = VectorizedMoeFeedForward(
                         embed_dim, ff_dim, num_experts, ff_activation,
-                        top_k=moe_top_k, dropout=ff_dropout, num_shared_experts=num_shared_experts,
+                        top_k=moe_top_k, dropout=ff_dropout, num_shared_experts=num_shared_experts, shared_expert_dim=shared_expert_dim,
                         router_amp=router_amp, router_dtype=router_dtype, from_legacy=vectorized_moe_from_legacy,
                         use_grouped_gemm=moe_grouped_gemm, bias_mode=moe_bias_mode,
                         shared_experts_bias_mode=moe_shared_experts_bias_mode,

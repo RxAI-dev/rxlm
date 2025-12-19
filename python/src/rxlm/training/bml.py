@@ -523,7 +523,7 @@ class IterativeJointLMTrainer(JointLMTrainer):
                         board_times.append(board_time - optim_time)
 
                 for callback in self.callbacks:
-                    should_stop = callback.on_batch_end(self.model, self.epoch_steps, loss, batch)
+                    should_stop = callback.on_batch_end(self.model, self.epoch_steps, loss * self.gradient_accumulation_steps, batch)
                     if should_stop:
                         self.is_running = False
 
