@@ -22,6 +22,11 @@ class TrainerCallback:
                 bool, None]:
         pass
 
+    def on_iteration_end(self, model: nn.Module, batch_idx: int) -> \
+            Union[
+                bool, None]:
+        pass
+
     def on_training_end(self, model: nn.Module) -> None:
         pass
 
@@ -312,6 +317,8 @@ class JointModelSaveCallback(TrainerCallback):
             save_models: list[ModelToSave] = ('decoder', 'encoder', 'head', 'mem_attn'),
             display_exc_trace: bool = False,
             use_ddp: bool = False,
+            skip_readme: bool = False,
+            iterative_mode: bool = False,
     ):
         self.save_dir = save_dir
         self.max_keep = max_keep
@@ -331,9 +338,43 @@ class JointModelSaveCallback(TrainerCallback):
         self.finished_epochs = 0
         self.save_models = save_models
         self.display_exc_trace = display_exc_trace
-        self.rank = int(os.environ['RANK']) if use_ddp else 0
+        self.skip_readme = skip_readme
+        self.use_ddp = use_ddp
+        self.iterative_mode = iterative_mode
+        self.rank = int(os.environ['RANK']) if self.use_ddp else 0
 
-    def _save_batch(self, model: Union[nn.Module, PyTorchModelHubMixin], component: str, hub_id: str = None):
+    def on_iteration_end(self, model: nn.Module, batch_idx: int) -> Union[bool, None]:
+        if self.iterative_mode:
+            if isinstance(model, DistributedDataParallel):
+                model = next(model.children())
+
+            if self.use_ddp:
+                torch.distributed.barrier()
+
+            if self.rank == 0:
+                if 'decoder' in self.save_models:
+                    batch_size = model.decoder.model.stm.batch_size
+                    model.decoder.model.stm.single_memory()
+                    self._save_batch(model.decoder, 'decoder', hub_id=self.hub_model_decoder, batch_idx=batch_idx)
+                    model.decoder.model.stm.batched_memory(batch_size)
+
+                if 'encoder' in self.save_models:
+                    self._save_batch(model.encoder, 'encoder', hub_id=self.hub_model_encoder, batch_idx=batch_idx)
+
+                if 'head' in self.save_models:
+                    self._save_batch(model.mlm_head, 'head', hub_id=self.hub_model_head, batch_idx=batch_idx)
+
+                if 'mem_attn' in self.save_models:
+                    batch_size = model.memory_attention.model.stm.batch_size
+                    model.memory_attention.model.stm.single_memory()
+                    self._save_batch(model.memory_attention, 'mem_attn', hub_id=self.hub_model_mem_attn,
+                                     batch_idx=batch_idx)
+                    model.memory_attention.model.stm.batched_memory(batch_size)
+
+            if self.use_ddp:
+                torch.distributed.barrier()
+
+    def _save_batch(self, model: Union[nn.Module, PyTorchModelHubMixin], component: str, hub_id: str = None, batch_idx: int = None):
         try:
             if model.save_pretrained is not None:
                 ckpt_path = os.path.join(
@@ -369,6 +410,8 @@ class JointModelSaveCallback(TrainerCallback):
                     repo_id=hub_id,
                     token=self.hf_token,
                     private=self.private_repo,
+                    ignore_patterns='README.md' if self.skip_readme else None,
+                    commit_message=f'In progress training - batch: {batch_idx}',
                 )
         except Exception as e:
             print(f"Error pushing batch checkpoint: {str(e)}")
@@ -377,27 +420,34 @@ class JointModelSaveCallback(TrainerCallback):
 
     def on_batch_end(self, model: nn.Module, batch_idx: int, loss: int, batch: dict[str, torch.Tensor]) -> Union[
         bool, None]:
-        if self.rank == 0 and self.save_checkpoint_after_n_batches is not None and batch_idx != 0 and batch_idx % self.save_checkpoint_after_n_batches == 0:
+        if not self.iterative_mode and self.save_checkpoint_after_n_batches is not None and batch_idx != 0 and batch_idx % self.save_checkpoint_after_n_batches == 0:
             if isinstance(model, DistributedDataParallel):
                 model = next(model.children())
 
-            if 'decoder' in self.save_models:
-                batch_size = model.decoder.model.stm.batch_size
-                model.decoder.model.stm.single_memory()
-                self._save_batch(model.decoder, 'decoder', hub_id=self.hub_model_decoder)
-                model.decoder.model.stm.batched_memory(batch_size)
+            if self.use_ddp:
+                torch.distributed.barrier()
 
-            if 'encoder' in self.save_models:
-                self._save_batch(model.encoder, 'encoder', hub_id=self.hub_model_encoder)
+            if self.rank == 0:
+                if 'decoder' in self.save_models:
+                    batch_size = model.decoder.model.stm.batch_size
+                    model.decoder.model.stm.single_memory()
+                    self._save_batch(model.decoder, 'decoder', hub_id=self.hub_model_decoder, batch_idx=batch_idx)
+                    model.decoder.model.stm.batched_memory(batch_size)
 
-            if 'head' in self.save_models:
-                self._save_batch(model.mlm_head, 'head', hub_id=self.hub_model_head)
+                if 'encoder' in self.save_models:
+                    self._save_batch(model.encoder, 'encoder', hub_id=self.hub_model_encoder, batch_idx=batch_idx)
 
-            if 'mem_attn' in self.save_models:
-                batch_size = model.memory_attention.model.stm.batch_size
-                model.memory_attention.model.stm.single_memory()
-                self._save_batch(model.memory_attention, 'mem_attn', hub_id=self.hub_model_mem_attn)
-                model.memory_attention.model.stm.batched_memory(batch_size)
+                if 'head' in self.save_models:
+                    self._save_batch(model.mlm_head, 'head', hub_id=self.hub_model_head, batch_idx=batch_idx)
+
+                if 'mem_attn' in self.save_models:
+                    batch_size = model.memory_attention.model.stm.batch_size
+                    model.memory_attention.model.stm.single_memory()
+                    self._save_batch(model.memory_attention, 'mem_attn', hub_id=self.hub_model_mem_attn, batch_idx=batch_idx)
+                    model.memory_attention.model.stm.batched_memory(batch_size)
+
+            if self.use_ddp:
+                torch.distributed.barrier()
 
     def _save_validation(self, model: Union[nn.Module, PyTorchModelHubMixin], component: str, epoch: int,
                          val_loss: float, hub_id: str = None):
@@ -446,6 +496,7 @@ class JointModelSaveCallback(TrainerCallback):
                     commit_message=f'Epoch {epoch} - Val loss {val_loss:.4f}',
                     token=self.hf_token,
                     private=self.private_repo,
+                    ignore_patterns='README.md' if self.skip_readme else None,
                 )
         except Exception as e:
             print(f"Error pushing epoch checkpoint: {str(e)}")
@@ -519,6 +570,7 @@ class JointModelSaveCallback(TrainerCallback):
                     commit_message=self.final_commit_message or f'Final pre-trained model, after {self.finished_epochs} epochs',
                     token=self.hf_token,
                     private=self.private_repo,
+                    ignore_patterns='README.md' if self.skip_readme else None,
                 )
         except Exception as e:
             print(f"Error pushing final model: {str(e)}")

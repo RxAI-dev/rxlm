@@ -60,7 +60,7 @@ class ShortTermMemory(nn.Module):
             self.register_buffer('memory', trained_stm)
 
     def reset(self, init_type: str = None):
-        self.memory = self._init_tensor(init_type).to(self.memory.device)
+        self.memory = self._init_tensor(init_type).to(self.memory.device, dtype=self.memory.dtype)
 
     def clone_detach_reset(self):
         self.memory = self.memory.detach().clone()
@@ -68,8 +68,9 @@ class ShortTermMemory(nn.Module):
     def resize(self, new_stm_size: int, init_type: str = None):
         self.stm_size = new_stm_size
         device = self.memory.device
+        dtype = self.memory.dtype
         delattr(self, 'memory')
-        self.register_buffer('memory', self._init_tensor(init_type).to(device))
+        self.register_buffer('memory', self._init_tensor(init_type).to(device, dtype=dtype))
 
     def batched_memory(self, batch_size: int, init_type: str = None):
         if init_type is not None:
@@ -77,9 +78,10 @@ class ShortTermMemory(nn.Module):
                 'STM init type must be one of "normal", "standard", "uniform", "ones", "zeros"'
             self.init_type = init_type
         device = self.memory.device
+        dtype = self.memory.dtype
         self.batch_size = batch_size
         delattr(self, 'memory')
-        self.register_buffer('memory', self._init_tensor().to(device))
+        self.register_buffer('memory', self._init_tensor().to(device, dtype=dtype))
 
     def single_memory(self, init_type: str = None, use_mean_from_batch: bool = False):
         if init_type is not None:
@@ -87,6 +89,7 @@ class ShortTermMemory(nn.Module):
                 'STM init type must be one of "normal", "standard", "uniform", "ones", "zeros"'
             self.init_type = init_type
         device = self.memory.device
+        dtype = self.memory.dtype
         self.batch_size = 1
         if use_mean_from_batch:
             batch_mean = self.memory.mean(dim=(1, 2, 3), keepdim=True)
@@ -94,4 +97,4 @@ class ShortTermMemory(nn.Module):
             self.register_buffer('memory', batch_mean)
         else:
             delattr(self, 'memory')
-            self.register_buffer('memory', self._init_tensor().to(device))
+            self.register_buffer('memory', self._init_tensor().to(device, dtype=dtype))

@@ -39,11 +39,6 @@ RUN pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128
 # Instalacja RxLM 0.3.50 wraz z zależnościami
 RUN pip install rxlm==0.3.50 transformers tokenizers huggingface_hub datasets tensorboard nltk
 
-# Instalacja grouped_gemm bez CUTLASS
-RUN GROUPED_GEMM_CUTLASS=0 \
-    FORCE_CUDA=1 \
-    pip install grouped_gemm --no-build-isolation
-
 # Instalacja Flash Attention 2.8.1 ze skompilowanych źródeł
 RUN wget https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.1/flash_attn-2.8.1+cu12torch2.8cxx11abiFALSE-cp312-cp312-linux_x86_64.whl \
     && pip install --no-dependencies --upgrade flash_attn-2.8.1+cu12torch2.8cxx11abiFALSE-cp312-cp312-linux_x86_64.whl \
@@ -63,6 +58,7 @@ else\n\
     echo "Installing Transformer Engine 2.8.0"\n\
     echo "This may take 10-20 minutes..."\n\
     pip3 install --no-build-isolation transformer-engine[pytorch]==2.8.0\n\
+    pip install grouped_gemm --no-build-isolation\n\
     echo "Transformer Engine installed successfully!"\n\
 fi\n\
 \n\

@@ -36,8 +36,8 @@ RUN pip install --upgrade pip setuptools wheel ninja
 # Instalacja PyTorch 2.8.0 dla CUDA 12.8
 RUN pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128
 
-# Instalacja RxLM 0.3.50 wraz z zależnościami
-RUN pip install rxlm==0.3.50 transformers tokenizers huggingface_hub datasets tensorboard nltk
+# Instalacja RxLM 0.3.58 wraz z zależnościami
+RUN pip install rxlm==0.3.58 transformers tokenizers huggingface_hub datasets tensorboard nltk
 
 # Instalacja grouped_gemm z CUTLASS - wymuszamy architekturę H100 (9.0)
 RUN GROUPED_GEMM_CUTLASS=1 \
@@ -49,6 +49,8 @@ RUN GROUPED_GEMM_CUTLASS=1 \
 RUN wget https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.1/flash_attn-2.8.1+cu12torch2.8cxx11abiFALSE-cp312-cp312-linux_x86_64.whl \
     && pip install --no-dependencies --upgrade flash_attn-2.8.1+cu12torch2.8cxx11abiFALSE-cp312-cp312-linux_x86_64.whl \
     && rm flash_attn-2.8.1+cu12torch2.8cxx11abiFALSE-cp312-cp312-linux_x86_64.whl
+
+RUN pip install git+https://github.com/KellerJordan/Muon
 
 # Stwórz skrypt startowy, który najpierw instaluje Transformer Engine, potem uruchamia trening
 RUN echo '#!/bin/bash\n\

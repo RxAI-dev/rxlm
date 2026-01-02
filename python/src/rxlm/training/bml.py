@@ -84,6 +84,12 @@ class JointLMTrainer(BaseTrainer):
                     print(
                         f"Decoder loss scaled by {self.decoder_loss_scale}: {(decoder_loss * self.decoder_loss_scale).item():.4f}")
 
+        if self.writer is not None and self.total_steps % self.tensorboard_interval == 0:
+            self.writer.add_scalar('Encoder loss/Train', encoder_loss.item(), self.total_steps)
+            self.writer.add_scalar('Decoder loss/Train', decoder_loss.item(), self.total_steps)
+            self.writer.add_scalar('Encoder perplexity/Train', torch.exp(encoder_loss).item(), self.total_steps)
+            self.writer.add_scalar('Decoder perplexity/Train', torch.exp(decoder_loss).item(), self.total_steps)
+
         return (encoder_loss * self.encoder_loss_scale) + (decoder_loss * self.decoder_loss_scale)
 
     def valid_step(self, batch: dict[str, Union[torch.Tensor, dict[torch.Tensor]]]) -> tuple[
@@ -334,6 +340,8 @@ class IterativeJointLMTrainer(JointLMTrainer):
 
             # When we've collected N batches, run training loop
             if len(collected_batches) >= self.collect_n_batches:
+                if self.use_ddp:
+                    torch.distributed.barrier()
                 print(f'Train on collected: {self.collect_n_batches} batches')
                 self._train_on_collected_batches(
                     collected_batches,
@@ -349,11 +357,16 @@ class IterativeJointLMTrainer(JointLMTrainer):
                 collected_batches = []
                 collect_idx = 1
 
+                if self.use_ddp:
+                    torch.distributed.barrier()
+
                 if not self.is_running:
                     break
 
         # Train on any remaining collected batches
         if collected_batches and self.is_running:
+            if self.use_ddp:
+                torch.distributed.barrier()
             self._train_on_collected_batches(
                 collected_batches,
                 optimizer,
@@ -363,6 +376,9 @@ class IterativeJointLMTrainer(JointLMTrainer):
                 batch_size,
                 scaler=scaler,
             )
+
+            if self.use_ddp:
+                torch.distributed.barrier()
 
         # Validation at the end of epoch
         if self.validation_dataset:
@@ -404,16 +420,9 @@ class IterativeJointLMTrainer(JointLMTrainer):
 
         pre_forward_time = 0
         forward_time = 0
-        backward_time = 0
-        optim_time = 0
-        board_time = 0
-        callbacks_time = 0
 
         forward_times = []
         backward_times = []
-        optim_times = []
-        board_times = []
-        callbacks_times = []
 
         """Train on collected batches"""
         for i, batch in enumerate(collected_batches):
@@ -434,15 +443,10 @@ class IterativeJointLMTrainer(JointLMTrainer):
 
                         forward_b_time = sum(forward_times) / len(forward_times)
                         backward_b_time = sum(backward_times) / len(backward_times)
-                        optim_b_time = sum(optim_times) / len(optim_times)
-                        board_b_time = sum(board_times) / len(board_times)
-                        callbacks_b_time = sum(callbacks_times) / len(callbacks_times)
 
                         print(f'Forward batch: {forward_b_time} / example: {forward_b_time / batch_size}')
                         print(f'Backward batch: {backward_b_time} / example: {backward_b_time / batch_size}')
-                        print(f'Optim batch: {optim_b_time} / example: {optim_b_time / batch_size}')
-                        print(f'Board batch: {board_b_time} / example: {board_b_time / batch_size}')
-                        print(f'Callbacks batch: {callbacks_b_time} / example: {callbacks_b_time / batch_size}')
+
 
                 if self.debug_timing and 100 < i < 200:
                     pre_forward_time = datetime.timestamp(datetime.now())
@@ -465,8 +469,7 @@ class IterativeJointLMTrainer(JointLMTrainer):
                     loss.backward()
 
                 if self.debug_timing and 100 < i < 200:
-                    backward_time = datetime.timestamp(datetime.now())
-                    backward_times.append(backward_time - forward_time)
+                    backward_times.append(datetime.timestamp(datetime.now()) - forward_time)
 
                 self.optimizer_step_count += 1
                 if self.optimizer_step_count % self.gradient_accumulation_steps == 0:
@@ -485,48 +488,42 @@ class IterativeJointLMTrainer(JointLMTrainer):
                     if scheduler is not None:
                         scheduler.step()
 
-                    if self.debug_timing and 100 < i < 200:
-                        optim_time = datetime.timestamp(datetime.now())
-                        optim_times.append(optim_time - backward_time)
-
-                    if self.writer and self.total_steps % self.tensorboard_interval == 0:
-                        loss_item = (self.accumulated_loss / self.gradient_accumulation_steps).item()
-                        self.writer.add_scalar(
-                            'Loss/train',
-                            loss_item,
-                            self.total_steps,
-                        )
-                        self.writer.add_scalar(
-                            'Loss/train last epoch',
-                            loss_item,
-                            self.epoch_steps
-                        )
-                        self.writer.add_scalar(
-                            'Perplexity/train',
-                            torch.exp(torch.tensor(loss_item)),
-                            self.total_steps,
-                        )
-
-                        self.total_tokens += accumulated_tokens.item()
-                        accumulated_tokens = torch.tensor(0, device=self.device, dtype=torch.long)
-                        self.writer.add_scalar(
-                            'Processed tokens',
-                            self.total_tokens,
-                            self.total_steps
-                        )
-
                     self.accumulated_loss = torch.tensor(0.0, device=self.device)
                     self.optimizer_step_count = 0
 
-                    if self.debug_timing and 100 < i < 200:
-                        board_time = datetime.timestamp(datetime.now())
-                        board_times.append(board_time - optim_time)
+                if self.writer and self.total_steps % self.tensorboard_interval == 0:
+                    loss_item = (loss * self.gradient_accumulation_steps).item()
+                    self.writer.add_scalar(
+                        'Loss/train',
+                        loss_item,
+                        self.total_steps,
+                    )
+                    self.writer.add_scalar(
+                        'Loss/train last epoch',
+                        loss_item,
+                        self.epoch_steps
+                    )
+                    self.writer.add_scalar(
+                        'Perplexity/train',
+                        torch.exp(torch.tensor(loss_item)),
+                        self.total_steps,
+                    )
+
+                    self.total_tokens += accumulated_tokens.item()
+                    accumulated_tokens = torch.tensor(0, device=self.device, dtype=torch.long)
+                    self.writer.add_scalar(
+                        'Processed tokens',
+                        self.total_tokens,
+                        self.total_steps
+                    )
 
                 for callback in self.callbacks:
                     should_stop = callback.on_batch_end(self.model, self.epoch_steps, loss * self.gradient_accumulation_steps, batch)
                     if should_stop:
                         self.is_running = False
 
-                if self.debug_timing and 100 < i < 200:
-                    callbacks_time = datetime.timestamp(datetime.now())
-                    callbacks_times.append(callbacks_time - board_time)
+
+        for callback in self.callbacks:
+            should_stop = callback.on_iteration_end(self.model, self.epoch_steps)
+            if should_stop:
+                self.is_running = False
