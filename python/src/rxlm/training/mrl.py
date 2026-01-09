@@ -188,7 +188,7 @@ class MRLTrainer:
     def __init__(
             self,
             actor: MrlActorModel,
-            critic: MrlCriticModel,
+            critic: Optional[MrlCriticModel],
             reference_model: MrlActorModel,
             reward: MrlRewardModel,
             device: torch.device,
@@ -205,11 +205,15 @@ class MRLTrainer:
 
         Args:
             actor (MrlActorModel): MRL Actor model with encoder, decoder and memory attention.
-            critic (MrlCriticModel): MRL Critic network for advantage estimation.
+            critic (Optional[MrlCriticModel]): MRL Critic network for advantage estimation.
+                Required for PPO/IMPO algorithms, optional for GRPO/RLOO which use critic-free advantage estimation.
             reward (MrlRewardModel): MRL Reward model or extension.
             device (torch.device): Device used for training.
             config (MrlConfig): Configuration dictionary with hyperparameters.
-            rl_algorithm (RlAlgorithm): Reinforcement Learning algorithm (currently only PPO available).
+            rl_algorithm (RlAlgorithm): Reinforcement Learning algorithm (PPO, IMPO, GRPO, RLOO, etc.).
+                Different algorithms have different requirements:
+                - PPO/IMPO: require critic network
+                - GRPO/RLOO: critic-free, use group-relative or leave-one-out advantages
             sampler_config (SamplerConfig): Sampler configuration.
             log_dir (str): Log directory for TensorBoard logs.
             use_ddp (bool): Use Distributed Data Parallel mode.
@@ -219,6 +223,11 @@ class MRLTrainer:
         self.actor = actor
         self.critic = critic
         self.reference_model = reference_model
+        self.rl_algorithm = rl_algorithm
+
+        # Check if critic is required but not provided
+        if rl_algorithm.requires_critic and critic is None:
+            raise ValueError(f"Algorithm {type(rl_algorithm).__name__} requires a critic network, but none was provided.")
 
         for p in self.reference_model.parameters():
             p.requires_grad = False
@@ -254,10 +263,12 @@ class MRLTrainer:
         # Move models to device
         if use_amp:
             self.actor.to(self.device)
-            self.critic.to(self.device)
+            if self.critic is not None:
+                self.critic.to(self.device)
         else:
             self.actor.to(self.device, dtype=dtype)
-            self.critic.to(self.device, dtype=dtype)
+            if self.critic is not None:
+                self.critic.to(self.device, dtype=dtype)
 
         # Batch Sampler for answer generation
         self.generator = None
@@ -305,7 +316,8 @@ class MRLTrainer:
         self.optimizer, self.critic_optimizer = self._init_optimizers(**self.optim_config)
 
         self.scaler = torch.amp.GradScaler() if self.use_amp else None
-        self.critic_scaler = torch.amp.GradScaler() if self.use_amp else None
+        # Only create critic scaler if critic is used
+        self.critic_scaler = torch.amp.GradScaler() if (self.use_amp and self.critic is not None) else None
 
         # TensorBoard Writer
         if log_dir and not os.path.exists(log_dir):
@@ -315,8 +327,6 @@ class MRLTrainer:
         self.global_step = self._init_steps()
         self.epoch_step = self._init_steps()
         self.stage_step = self._init_steps()
-
-        self.rl_algorithm = rl_algorithm
 
         # Dynamic fields, updated for each curriculum step
         self.curriculum_steps = 0
@@ -342,7 +352,7 @@ class MRLTrainer:
             encoder_lr: float,
             memory_lr: Optional[float] = None,
             memory_attn_lr: Optional[float] = None,
-    ) -> tuple[torch.optim.Optimizer, torch.optim.Optimizer]:
+    ) -> tuple[torch.optim.Optimizer, Optional[torch.optim.Optimizer]]:
         if memory_lr is not None:
             optimizer = torch.optim.AdamW([
                 {'params': self.actor.embedding_parameters(), 'lr': embedding_lr},
@@ -365,13 +375,17 @@ class MRLTrainer:
                 weight_decay=weight_decay,
             )
 
-        critic_optimizer = torch.optim.AdamW(
-            [
-                {'params': self.critic.head_parameters(), 'lr': critic_lr},
-                {'params': self.critic.encoder_parameters(), 'lr': critic_encoder_lr},
-            ],
-            weight_decay=critic_weight_decay,
-        )
+        # Only create critic optimizer if critic is used (for PPO/IMPO)
+        # GRPO, RLOO, and other critic-free algorithms don't need this
+        critic_optimizer = None
+        if self.critic is not None:
+            critic_optimizer = torch.optim.AdamW(
+                [
+                    {'params': self.critic.head_parameters(), 'lr': critic_lr},
+                    {'params': self.critic.encoder_parameters(), 'lr': critic_encoder_lr},
+                ],
+                weight_decay=critic_weight_decay,
+            )
 
         return optimizer, critic_optimizer
 
@@ -951,8 +965,10 @@ class MRLTrainer:
                 if should_reset_stm and step_idx == 0:
                     self.memory_warmup(query, answer)
 
-                # 7. Update critic
-                critic_loss_item = self.update_critic((query, answer, next_query), step_critic_values, epoch)
+                # 7. Update critic (only for critic-based algorithms like PPO/IMPO)
+                critic_loss_item = 0.0
+                if self.rl_algorithm.requires_critic:
+                    critic_loss_item = self.update_critic((query, answer, next_query), step_critic_values, epoch)
 
                 # 8. Accumulate critic loss for epoch callbacks
                 critic_losses.append(critic_loss_item)
@@ -971,15 +987,38 @@ class MRLTrainer:
         return torch.mean(torch.tensor(all_losses)), torch.mean(torch.tensor(critic_losses))
 
     def _critic_values_rewards_and_dones(self, trajectories: list[MrlTrajectoryEpisode]):
+        """
+        Get critic values, rewards, and done flags for trajectories.
+
+        For critic-free algorithms (GRPO, RLOO), values are set to zeros since they're not used.
+        The advantage calculation in these algorithms uses rewards only (group-relative or leave-one-out).
+        """
         flat_trajectories = [t for episode in trajectories for t in episode['steps']]
-        values = torch.stack([
-            self._critic_values(*self._move_multiple_batches(*t['state'])) for t in flat_trajectories
-        ]).to(self.device)
         rewards = torch.stack([t['reward'] for t in flat_trajectories]).to(self.device)
         dones = torch.stack([torch.tensor(t['done']) for t in flat_trajectories]).to(self.device)
+
+        # For critic-free algorithms, we don't need to compute values
+        if not self.rl_algorithm.requires_critic:
+            # Return zeros with same shape as rewards - not used but needed for API compatibility
+            values = torch.zeros_like(rewards)
+        else:
+            values = torch.stack([
+                self._critic_values(*self._move_multiple_batches(*t['state'])) for t in flat_trajectories
+            ]).to(self.device)
+
         return values, rewards, dones
 
     def _critic_values(self, *moved_state: tuple[TokenizedDict, TokenizedDict, TokenizedDict]) -> torch.Tensor:
+        """
+        Calculate critic values for given states.
+
+        Only used for critic-based algorithms (PPO, IMPO).
+        For GRPO/RLOO, this method is not called.
+        """
+        if self.critic is None:
+            raise RuntimeError("Cannot compute critic values without a critic network. "
+                               "Use a critic-based algorithm (PPO, IMPO) or don't call this method.")
+
         # 1. Calculate critic values
         with torch.no_grad():
             # 2. Get concatenated critic states
