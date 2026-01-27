@@ -1694,6 +1694,7 @@ class SequencePackingIterableDataset(IterableDataset):
             pack_efficiency_threshold: float = 0.5,
             eos_token_id: int = None,
             pad_token_id: int = None,
+            log_buffer_packing: bool = False,
             **kwargs,
     ):
         """
@@ -1720,6 +1721,9 @@ class SequencePackingIterableDataset(IterableDataset):
         self.batch_size = batch_size
         self.min_seq_len = min_seq_len
         self.pack_efficiency_threshold = pack_efficiency_threshold
+        self.log_buffer_packing = log_buffer_packing
+        self.total_examples_processed = 0
+        self.total_examples_packed = 0
 
         # Token IDs
         self.eos_token_id = eos_token_id if eos_token_id is not None else tokenizer.eos_token_id
@@ -1908,11 +1912,20 @@ class SequencePackingIterableDataset(IterableDataset):
 
     def _process_buffer(self, buffer: list[torch.Tensor]):
         """Pack buffer sequences and yield batches."""
+        buffer_size = len(buffer)
+        self.total_examples_processed += buffer_size
+        if self.log_buffer_packing:
+            print(f'Processed {buffer_size} examples / Total {self.total_examples_processed} examples')
         # Pack sequences
         packed_sequences = self._pack_sequences_first_fit(buffer)
 
+        packed_size = len(packed_sequences)
+        self.total_examples_packed += packed_size
+        if self.log_buffer_packing:
+            print(f'Packed {packed_size} examples / Total {self.total_examples_packed} packed examples')
+
         # Yield in batches
-        for i in range(0, len(packed_sequences), self.batch_size):
+        for i in range(0, packed_size, self.batch_size):
             batch_seqs = packed_sequences[i:i + self.batch_size]
 
             # Skip incomplete batches at the end
