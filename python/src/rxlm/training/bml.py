@@ -363,6 +363,7 @@ class IterativeJointLMTrainer(JointLMTrainer):
                     collate_fn=_prebatched_collate_fn,
                     num_workers=self.num_dataloader_workers,
                 )
+                train_sampler = None
             else:
                 train_sampler = torch.utils.data.DistributedSampler(
                     dataset,
@@ -389,6 +390,7 @@ class IterativeJointLMTrainer(JointLMTrainer):
                     collate_fn=_prebatched_collate_fn,
                     num_workers=self.num_dataloader_workers,
                 )
+                train_sampler = None
             else:
                 dataloader = torch.utils.data.DataLoader(
                     dataset,
@@ -399,6 +401,7 @@ class IterativeJointLMTrainer(JointLMTrainer):
                     drop_last=True,
                     num_workers=self.num_dataloader_workers,
                 )
+                train_sampler = None
 
         scaler = torch.amp.GradScaler() if self.use_amp and self.dtype != torch.bfloat16 else None
 
@@ -409,6 +412,8 @@ class IterativeJointLMTrainer(JointLMTrainer):
             else:
                 self.current_epoch = epoch
                 self.epoch_steps = 0
+                if train_sampler is not None:
+                    train_sampler.set_epoch(epoch)
                 self._run_epoch(dataloader, epoch, optimizer, batch_size, scaler=scaler, scheduler=scheduler)
                 if self.use_ddp:
                     import torch.distributed as dist
