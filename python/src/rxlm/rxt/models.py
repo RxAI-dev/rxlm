@@ -141,6 +141,7 @@ class RxTComponentBase(nn.Module):
             use_attention_output_bias: bool = True, # legacy compat
             legacy_stm_in_encoder: bool = False, # legacy compat
             moe_use_cutlass_grouped_gemm: bool = True,
+            rope_base: int = 10_000,
             **kwargs
     ):
         super(RxTComponentBase, self).__init__(**kwargs)
@@ -162,7 +163,7 @@ class RxTComponentBase(nn.Module):
                     assert layer_type in ['mha', 'gqa', 'mqa', 'gma', 'dma', 'sqa', 'gla', 'deltanet', 'gated_deltanet', 'kda', 'md_gdn'], 'Stateless layers self-attention has incorrect type.'
 
         embedding = nn.Embedding(vocab_size, embed_dim)
-        rope = RotaryPositionalEmbedding(embed_dim // att_heads, seq_len) if not use_nope else None
+        rope = RotaryPositionalEmbedding(embed_dim // att_heads, seq_len, rope_base) if not use_nope else None
 
         stm = ShortTermMemory(num_layers, embed_dim, stm_size) if not skip_memory_cross_attention or legacy_stm_in_encoder else None
 
@@ -386,9 +387,9 @@ class RxTComponentBase(nn.Module):
         if freeze_memory:
             self.freeze_memory(with_norms=freeze_memory_norms)
 
-    def update_max_len(self, max_seq_len: int):
+    def update_max_len(self, max_seq_len: int, base: int = None):
         for layer in self.model.layers:
-            layer.update_max_len(max_seq_len)
+            layer.update_max_len(max_seq_len, base=base)
 
     def forward(self, x: torch.Tensor, attention_mask: torch.Tensor = None) -> Union[
         torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:

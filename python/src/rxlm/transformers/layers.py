@@ -143,10 +143,10 @@ class ReactiveTransformerLayer(nn.Module):
                 active_expert_params.extend(list(self.ff.experts[i].parameters()))
             return mem_params + attn_params + ff_norm_params + router_params + active_expert_params
 
-    def update_max_len(self, max_seq_len: int):
+    def update_max_len(self, max_seq_len: int, base: int = None):
         # Only update rope for standard attention (linear attention doesn't use rope)
         if self.attention.rope is not None:
-            self.attention.rope.update_max_len(max_seq_len)
+            self.attention.rope.update_max_len(max_seq_len, base=base)
         # if self.memory_cross_attention.rope is not None:
         #     self.memory_cross_attention.rope.update_max_len(max_seq_len)
 
