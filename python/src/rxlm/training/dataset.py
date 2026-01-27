@@ -1669,3 +1669,317 @@ class SmatDataset(MrlCurriculumDataset):
                 collate_interaction_batch(step_batch) for step_batch in transposed_interactions
             ]
         }
+
+
+class SequencePackingIterableDataset(IterableDataset):
+    """
+    Iterable dataset that implements sequence packing for efficient training.
+
+    This dataset pre-fetches examples, tokenizes them, and packs multiple short
+    sequences into single sequences of max_seq_len to maximize GPU utilization.
+
+    Designed for use with IterativeJointLMTrainer for Joint LM pre-training.
+    """
+
+    def __init__(
+            self,
+            hf_iterable_dataset: HfIterableDataset,
+            tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+            max_seq_len: int = 4096,
+            mask_prob: float = 0.15,
+            hf_field: str = 'text',
+            prefetch_size: int = 8192,
+            batch_size: int = 8,
+            min_seq_len: int = 32,
+            pack_efficiency_threshold: float = 0.5,
+            eos_token_id: int = None,
+            pad_token_id: int = None,
+            **kwargs,
+    ):
+        """
+        Args:
+            hf_iterable_dataset: HuggingFace iterable/streaming dataset
+            tokenizer: Tokenizer for encoding text
+            max_seq_len: Maximum sequence length for packed sequences
+            mask_prob: Probability of masking tokens for MLM (encoder)
+            hf_field: Field name containing text in the dataset
+            prefetch_size: Number of examples to prefetch for packing
+            batch_size: Batch size for yielded batches
+            min_seq_len: Minimum sequence length to include (shorter sequences are discarded)
+            pack_efficiency_threshold: Minimum packing efficiency (0.0-1.0), sequences below this are padded
+            eos_token_id: EOS token ID (defaults to tokenizer's eos_token_id)
+            pad_token_id: PAD token ID (defaults to tokenizer's pad_token_id or 0)
+        """
+        super().__init__(**kwargs)
+        self.hf_dataset = hf_iterable_dataset
+        self.tokenizer = tokenizer
+        self.max_seq_len = max_seq_len
+        self.mask_prob = mask_prob
+        self.hf_field = hf_field
+        self.prefetch_size = prefetch_size
+        self.batch_size = batch_size
+        self.min_seq_len = min_seq_len
+        self.pack_efficiency_threshold = pack_efficiency_threshold
+
+        # Token IDs
+        self.eos_token_id = eos_token_id if eos_token_id is not None else tokenizer.eos_token_id
+        self.pad_token_id = pad_token_id if pad_token_id is not None else (tokenizer.pad_token_id or 0)
+        self.vocab_size = tokenizer.vocab_size
+        self.unk_token_id = tokenizer.unk_token_id
+        self.mask_token_id = tokenizer.mask_token_id
+
+    def _tokenize_text(self, text: str) -> torch.Tensor:
+        """Tokenize text without padding, returning only the token IDs."""
+        inputs = self.tokenizer(
+            text,
+            max_length=self.max_seq_len,
+            truncation=True,
+            padding=False,  # No padding - we'll handle this during packing
+            return_tensors='pt',
+            return_attention_mask=False,
+        )
+
+        input_ids = inputs['input_ids'][0]
+
+        # Handle out-of-vocab tokens
+        input_ids[input_ids >= self.vocab_size] = self.unk_token_id
+        input_ids[input_ids < 0] = self.unk_token_id
+
+        return input_ids
+
+    def _pack_sequences_first_fit(
+            self,
+            sequences: list[torch.Tensor],
+    ) -> list[torch.Tensor]:
+        """
+        Pack sequences using First-Fit Decreasing bin packing algorithm.
+
+        Args:
+            sequences: List of tokenized sequences (variable length tensors)
+
+        Returns:
+            List of packed sequences, each of length max_seq_len
+        """
+        # Sort sequences by length (descending) for better packing
+        sorted_seqs = sorted(sequences, key=lambda x: len(x), reverse=True)
+
+        # Bins: each bin is a list of sequences and current total length
+        bins: list[tuple[list[torch.Tensor], int]] = []
+
+        for seq in sorted_seqs:
+            seq_len = len(seq)
+
+            # Skip sequences that are too short
+            if seq_len < self.min_seq_len:
+                continue
+
+            # If sequence is at or over max_seq_len, truncate and add as its own bin
+            if seq_len >= self.max_seq_len:
+                bins.append(([seq[:self.max_seq_len]], self.max_seq_len))
+                continue
+
+            # Find first bin that can fit this sequence (with 1 token for EOS separator)
+            placed = False
+            for i, (bin_seqs, bin_len) in enumerate(bins):
+                # Need space for sequence + 1 EOS token separator
+                if bin_len + seq_len + 1 <= self.max_seq_len:
+                    bin_seqs.append(seq)
+                    bins[i] = (bin_seqs, bin_len + seq_len + 1)
+                    placed = True
+                    break
+
+            # If no bin has space, create a new bin
+            if not placed:
+                bins.append(([seq], seq_len))
+
+        # Convert bins to packed sequences
+        packed_sequences = []
+        for bin_seqs, bin_len in bins:
+            # Check packing efficiency
+            efficiency = bin_len / self.max_seq_len
+            if efficiency < self.pack_efficiency_threshold and len(bin_seqs) == 1:
+                # For single sequences with low efficiency, still include them
+                # (they might be valuable long sequences)
+                pass
+
+            # Concatenate sequences with EOS separators
+            packed_tokens = []
+            for j, seq in enumerate(bin_seqs):
+                packed_tokens.append(seq)
+                # Add EOS separator between sequences (not after the last one to save space)
+                if j < len(bin_seqs) - 1:
+                    packed_tokens.append(torch.tensor([self.eos_token_id], dtype=seq.dtype))
+
+            packed = torch.cat(packed_tokens)
+
+            # Pad to max_seq_len if needed
+            if len(packed) < self.max_seq_len:
+                padding = torch.full(
+                    (self.max_seq_len - len(packed),),
+                    self.pad_token_id,
+                    dtype=packed.dtype
+                )
+                packed = torch.cat([packed, padding])
+
+            packed_sequences.append(packed)
+
+        return packed_sequences
+
+    def _create_joint_lm_batch(self, packed_sequences: list[torch.Tensor]) -> dict:
+        """
+        Create a batch in JointLM format with encoder MLM masking and decoder targets.
+
+        Args:
+            packed_sequences: List of packed sequences (all same length)
+
+        Returns:
+            Batch dict compatible with JointLMTrainer
+        """
+        batch_size = len(packed_sequences)
+
+        # Stack into batch tensors
+        decoder_input_ids = torch.stack(packed_sequences)  # (batch, seq_len)
+
+        # Create attention mask (1 for real tokens, 0 for padding)
+        attention_mask = (decoder_input_ids != self.pad_token_id).long()
+
+        # Decoder targets are same as input for autoregressive LM
+        decoder_targets = decoder_input_ids.clone()
+
+        # Create encoder inputs with MLM masking
+        encoder_input_ids = decoder_input_ids.clone()
+        encoder_labels = decoder_input_ids.clone()
+
+        # Apply MLM masking
+        for i in range(batch_size):
+            # Create masked indices (only mask where attention_mask is 1)
+            masked_indices = torch.bernoulli(
+                torch.full((self.max_seq_len,), self.mask_prob)
+            ).bool() & attention_mask[i].bool()
+
+            # Set labels to -100 for non-masked positions
+            encoder_labels[i][~masked_indices] = -100
+
+            # Replace masked positions with mask token
+            encoder_input_ids[i][masked_indices] = self.mask_token_id
+
+        return {
+            'decoder': {
+                'input_ids': decoder_input_ids,
+                'targets': decoder_targets,
+            },
+            'encoder': {
+                'input_ids': encoder_input_ids,
+                'labels': encoder_labels,
+            },
+            'attention_mask': attention_mask,
+        }
+
+    def __iter__(self):
+        """
+        Iterate through the dataset, yielding packed and batched examples.
+
+        The iterator:
+        1. Pre-fetches prefetch_size examples
+        2. Tokenizes them
+        3. Packs sequences efficiently
+        4. Yields batches of packed sequences
+        """
+        buffer = []
+
+        for example in self.hf_dataset:
+            text = example[self.hf_field]
+
+            # Tokenize
+            tokens = self._tokenize_text(text)
+
+            # Skip very short sequences
+            if len(tokens) >= self.min_seq_len:
+                buffer.append(tokens)
+
+            # When buffer is full, pack and yield batches
+            if len(buffer) >= self.prefetch_size:
+                yield from self._process_buffer(buffer)
+                buffer = []
+
+        # Process remaining buffer
+        if buffer:
+            yield from self._process_buffer(buffer)
+
+    def _process_buffer(self, buffer: list[torch.Tensor]):
+        """Pack buffer sequences and yield batches."""
+        # Pack sequences
+        packed_sequences = self._pack_sequences_first_fit(buffer)
+
+        # Yield in batches
+        for i in range(0, len(packed_sequences), self.batch_size):
+            batch_seqs = packed_sequences[i:i + self.batch_size]
+
+            # Skip incomplete batches at the end
+            if len(batch_seqs) == self.batch_size:
+                yield self._create_joint_lm_batch(batch_seqs)
+
+    @classmethod
+    def from_hf_hub(
+            cls,
+            dataset_id: str,
+            subset: str = None,
+            split: str = 'train',
+            target_field: str = 'text',
+            tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast] = None,
+            tokenizer_hub_id: str = None,
+            max_seq_len: int = 4096,
+            mask_prob: float = 0.15,
+            prefetch_size: int = 8192,
+            batch_size: int = 8,
+            load_kwargs: dict = None,
+            load_tokenizer_kwargs: dict = None,
+            **kwargs
+    ):
+        """
+        Load streaming dataset from HuggingFace Hub with sequence packing.
+
+        Args:
+            dataset_id (str): Hub dataset repository name
+            subset (str): Dataset subset (default: None)
+            split (str): Dataset split (default: "train")
+            target_field (str): Name of dataset field used for training (default: "text")
+            tokenizer: HuggingFace Tokenizer (default: None)
+            tokenizer_hub_id (str): HuggingFace Hub ID of tokenizer to load (default: None)
+            max_seq_len (int): Maximum sequence length (default: 4096)
+            mask_prob (float): MLM mask probability (default: 0.15)
+            prefetch_size (int): Number of examples to prefetch (default: 8192)
+            batch_size (int): Batch size (default: 8)
+            load_kwargs (dict): Additional args for HuggingFace API load_dataset function
+            load_tokenizer_kwargs (dict): Additional args for loading tokenizer
+            **kwargs: Additional args for the dataset class
+        """
+        assert tokenizer is not None or tokenizer_hub_id is not None, \
+            "One of the `tokenizer` or `tokenizer_hub_id` args must be provided."
+
+        if load_kwargs is None:
+            load_kwargs = {}
+        if load_tokenizer_kwargs is None:
+            load_tokenizer_kwargs = {}
+
+        if tokenizer is None:
+            tokenizer = load_tokenizer_from_hf_hub(tokenizer_hub_id, **load_tokenizer_kwargs)
+
+        hf_dataset = load_dataset(
+            dataset_id,
+            name=subset,
+            split=split,
+            streaming=True,
+            **load_kwargs
+        )
+
+        return cls(
+            hf_dataset,
+            tokenizer,
+            max_seq_len=max_seq_len,
+            mask_prob=mask_prob,
+            hf_field=target_field,
+            prefetch_size=prefetch_size,
+            batch_size=batch_size,
+            **kwargs
+        )
