@@ -18,7 +18,11 @@ class RotaryPositionalEmbedding(nn.Module):
         freqs = torch.einsum('i,j->ij', t, self.inv_freq)
         self.register_buffer('cache', freqs)
 
-    def update_max_len(self, max_seq_len: int):
+    def update_max_len(self, max_seq_len: int, base: int = None):
+        if base is not None:
+            self.base = base
+            self.inv_freq = 1.0 / (base ** (torch.arange(0, self.dim, 2).float() / self.dim))
+
         self.max_seq_len = max_seq_len
         t = torch.arange(max_seq_len).type_as(self.inv_freq)
         freqs = torch.einsum('i,j->ij', t, self.inv_freq)

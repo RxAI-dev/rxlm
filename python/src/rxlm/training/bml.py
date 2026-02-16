@@ -253,6 +253,14 @@ class JointLMTrainer(BaseTrainer):
         return avg_loss, metrics
 
 
+def _prebatched_collate_fn(batch: list) -> dict:
+    """
+    Collate function for pre-batched datasets.
+    Since the dataset yields already-batched data, just return the first (and only) item.
+    """
+    return batch[0]
+
+
 class IterativeJointLMTrainer(JointLMTrainer):
     """
     JointLMTrainer with batched collection and training for streaming datasets.
@@ -263,6 +271,9 @@ class IterativeJointLMTrainer(JointLMTrainer):
 
     This avoids CPU-bound bottlenecks from loading and tokenizing each batch
     separately during the training loop.
+
+    Supports pre-batched datasets (like SequencePackingIterableDataset) via the
+    use_prebatched_dataset flag.
     """
     def __init__(
             self,
@@ -283,6 +294,7 @@ class IterativeJointLMTrainer(JointLMTrainer):
             debug_timing: bool = False,
             use_torch_compile: bool = False,
             compile_config: Optional[CompileConfig] = None,
+            use_prebatched_dataset: bool = False,
             **kwargs
     ):
         super().__init__(
@@ -305,6 +317,114 @@ class IterativeJointLMTrainer(JointLMTrainer):
         self.collect_n_batches = collect_n_batches
         self.collect_log_interval = collect_log_interval
         self.debug_timing = debug_timing
+        self.use_prebatched_dataset = use_prebatched_dataset
+
+    def __call__(
+            self,
+            epochs: int,
+            batch_size: int,
+            dataset: torch.utils.data.Dataset = None,
+            validation_dataset: torch.utils.data.Dataset = None,
+            optimizer: torch.optim.Optimizer = None,
+            scheduler: torch.optim.lr_scheduler.LRScheduler = None,
+            ddp_find_unused_parameters: bool = False,
+    ) -> None:
+        """
+        Run training with support for pre-batched datasets.
+
+        When use_prebatched_dataset=True, the dataset is expected to yield
+        pre-batched data (e.g., from SequencePackingIterableDataset).
+        """
+        self.is_running = True
+        if dataset is None:
+            assert self.dataset is not None, 'You have to specify a dataset for training'
+            dataset = self.dataset
+        if optimizer is None:
+            assert self.optimizer is not None, 'You have to specify an optimizer for training'
+            optimizer = self.optimizer
+        if validation_dataset is not None:
+            self.validation_dataset = validation_dataset
+
+        if self.use_ddp:
+            from .ddp import get_os_ddp_config
+            rank, world_size = get_os_ddp_config()
+            self.model = DistributedDataParallel(
+                self.model,
+                device_ids=[self.device.index],
+                find_unused_parameters=ddp_find_unused_parameters
+            )
+
+            if self.use_prebatched_dataset:
+                # For pre-batched datasets, use batch_size=1 and passthrough collate
+                dataloader = torch.utils.data.DataLoader(
+                    dataset,
+                    batch_size=1,
+                    pin_memory=True,
+                    collate_fn=_prebatched_collate_fn,
+                    num_workers=self.num_dataloader_workers,
+                )
+                train_sampler = None
+            else:
+                train_sampler = torch.utils.data.DistributedSampler(
+                    dataset,
+                    shuffle=not self.use_iterable_dataset and self.ddp_shuffle,
+                    rank=rank,
+                    num_replicas=world_size,
+                    drop_last=True
+                ) if not self.use_iterable_dataset else None
+                dataloader = torch.utils.data.DataLoader(
+                    dataset,
+                    batch_size=batch_size,
+                    sampler=train_sampler,
+                    pin_memory=True,
+                    collate_fn=self.dataset_collate_fn,
+                    num_workers=self.num_dataloader_workers,
+                )
+        else:
+            if self.use_prebatched_dataset:
+                # For pre-batched datasets, use batch_size=1 and passthrough collate
+                dataloader = torch.utils.data.DataLoader(
+                    dataset,
+                    batch_size=1,
+                    pin_memory=True,
+                    collate_fn=_prebatched_collate_fn,
+                    num_workers=self.num_dataloader_workers,
+                )
+                train_sampler = None
+            else:
+                dataloader = torch.utils.data.DataLoader(
+                    dataset,
+                    batch_size=batch_size,
+                    shuffle=not self.use_iterable_dataset,
+                    pin_memory=True,
+                    collate_fn=self.dataset_collate_fn,
+                    drop_last=True,
+                    num_workers=self.num_dataloader_workers,
+                )
+                train_sampler = None
+
+        scaler = torch.amp.GradScaler() if self.use_amp and self.dtype != torch.bfloat16 else None
+
+        self.model.train()
+        for epoch in range(self.current_epoch, self.current_epoch + epochs):
+            if not self.is_running:
+                break
+            else:
+                self.current_epoch = epoch
+                self.epoch_steps = 0
+                if train_sampler is not None:
+                    train_sampler.set_epoch(epoch)
+                self._run_epoch(dataloader, epoch, optimizer, batch_size, scaler=scaler, scheduler=scheduler)
+                if self.use_ddp:
+                    import torch.distributed as dist
+                    dist.barrier()
+
+        if self.use_ddp:
+            import torch.distributed as dist
+            dist.destroy_process_group()
+        self.is_running = False
+        self.model.eval()
+        self.on_training_end()
 
     def _run_epoch(
             self,
