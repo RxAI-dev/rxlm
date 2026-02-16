@@ -2046,6 +2046,7 @@ class HybridReasoningSftDataset(Dataset):
             mask_prob: float = 0.15,
             cache_tokenized: bool = False,
             cache_remove_text: bool = True,
+            ignore_answer_special_tokens: bool = False,
             **kwargs,
     ):
         super(HybridReasoningSftDataset, self).__init__(**kwargs)
@@ -2075,6 +2076,7 @@ class HybridReasoningSftDataset(Dataset):
         self.mask_prob = mask_prob
         self.cache_tokenized = cache_tokenized
         self.cache_remove_text = cache_remove_text
+        self.ignore_answer_special_tokens = ignore_answer_special_tokens
 
         self.is_pre_tokenized = False
         self.is_list = isinstance(self.interactions, list)
@@ -2158,14 +2160,14 @@ class HybridReasoningSftDataset(Dataset):
 
             if token in train_start_tokens:
                 in_train_section = True
-                # Mask the special token itself
-                labels[i] = self.ignore_index
+                if self.ignore_answer_special_tokens:
+                    # Mask the special token itself
+                    labels[i] = self.ignore_index
             elif token in mask_start_tokens:
                 in_train_section = False
                 labels[i] = self.ignore_index
             elif token in end_tokens:
                 in_train_section = False
-                labels[i] = self.ignore_index
             elif not in_train_section:
                 labels[i] = self.ignore_index
 
