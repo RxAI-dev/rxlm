@@ -499,6 +499,7 @@ class RxTSimpleMemoryAttentionComponent(nn.Module):
             disable_residual: bool = False,
             debug_mode: bool = False,
             debug_interval: int = 10,
+            rope_base: int = 10_000,
             **kwargs,
     ):
         super(RxTSimpleMemoryAttentionComponent, self).__init__(**kwargs)
@@ -506,7 +507,7 @@ class RxTSimpleMemoryAttentionComponent(nn.Module):
         assert att_type in ['mha', 'gqa', 'mqa', 'gma', 'dma',
                             'sqa'], 'Memory attention type could be "mha", "gqa", "mqa", "gma", "dma", "sqa".'
 
-        rope = RotaryPositionalEmbedding(embed_dim // att_heads, seq_len)
+        rope = RotaryPositionalEmbedding(embed_dim // att_heads, seq_len, rope_base)
         stm = ShortTermMemory(num_layers, embed_dim, stm_size)
 
         if att_type in ['mha', 'gqa', 'mqa', 'sqa']:
@@ -602,6 +603,7 @@ class RxTInterlayerMemoryAttentionComponent(nn.Module):
             use_tanh_residual_gate: bool = True,
             debug_mode: bool = False,
             debug_interval: int = 10,
+            rope_base: int = 10_000,
             **kwargs,
     ):
         super(RxTInterlayerMemoryAttentionComponent, self).__init__(**kwargs)
@@ -609,7 +611,7 @@ class RxTInterlayerMemoryAttentionComponent(nn.Module):
         assert att_type in ['mha', 'gqa', 'mqa', 'gma', 'dma',
                             'sqa'], 'Memory attention type could be "mha", "gqa", "mqa", "gma", "dma", "sqa".'
 
-        rope = RotaryPositionalEmbedding(embed_dim // att_heads, seq_len)
+        rope = RotaryPositionalEmbedding(embed_dim // att_heads, seq_len, rope_base)
         stm = ShortTermMemory(num_layers, embed_dim, stm_size)
 
         if att_type in ['mha', 'gqa', 'mqa', 'sqa']:
@@ -741,6 +743,7 @@ class RxTSelfMemoryAttentionComponent(nn.Module):
             use_gate_for_self_attention: bool = False,
             debug_mode: bool = False,
             debug_interval: int = 10,
+            rope_base: int = 10_000,
             **kwargs,
     ):
         super(RxTSelfMemoryAttentionComponent, self).__init__(**kwargs)
@@ -748,7 +751,7 @@ class RxTSelfMemoryAttentionComponent(nn.Module):
         assert att_type in ['mha', 'gqa', 'mqa', 'gma', 'dma',
                             'sqa'], 'Memory attention type could be "mha", "gqa", "mqa", "gma", "dma", "sqa".'
 
-        rope = RotaryPositionalEmbedding(embed_dim // att_heads, seq_len)
+        rope = RotaryPositionalEmbedding(embed_dim // att_heads, seq_len, rope_base)
         stm = ShortTermMemory(num_layers, embed_dim, stm_size)
 
         if att_type in ['mha', 'gqa', 'mqa', 'sqa']:
@@ -875,6 +878,7 @@ class RxTSelfInterlayerMemoryAttentionComponent(nn.Module):
             use_tanh_residual_gate: bool = True,
             debug_mode: bool = False,
             debug_interval: int = 10,
+            rope_base: int = 10_000,
             **kwargs,
     ):
         super(RxTSelfInterlayerMemoryAttentionComponent, self).__init__(**kwargs)
@@ -882,7 +886,7 @@ class RxTSelfInterlayerMemoryAttentionComponent(nn.Module):
         assert att_type in ['mha', 'gqa', 'mqa', 'gma', 'dma',
                             'sqa'], 'Memory attention type could be "mha", "gqa", "mqa", "gma", "dma", "sqa".'
 
-        rope = RotaryPositionalEmbedding(embed_dim // att_heads, seq_len)
+        rope = RotaryPositionalEmbedding(embed_dim // att_heads, seq_len, rope_base)
         stm = ShortTermMemory(num_layers, embed_dim, stm_size)
 
         if att_type in ['mha', 'gqa', 'mqa', 'sqa']:
@@ -1022,6 +1026,7 @@ class RxTGroupedSelfInterlayerMemoryAttentionComponent(nn.Module):
             use_tanh_residual_gate: bool = True,
             debug_mode: bool = False,
             debug_interval: int = 10,
+            rope_base: int = 10_000,
             **kwargs,
     ):
         super(RxTGroupedSelfInterlayerMemoryAttentionComponent, self).__init__(**kwargs)
@@ -1029,7 +1034,7 @@ class RxTGroupedSelfInterlayerMemoryAttentionComponent(nn.Module):
         assert att_type in ['mha', 'gqa', 'mqa', 'gma', 'dma',
                             'sqa'], 'Memory attention type could be "mha", "gqa", "mqa", "gma", "dma", "sqa".'
 
-        rope = RotaryPositionalEmbedding(embed_dim // att_heads, seq_len)
+        rope = RotaryPositionalEmbedding(embed_dim // att_heads, seq_len, rope_base)
         stm = ShortTermMemory(num_layers, embed_dim, stm_size)
 
         if att_type in ['mha', 'gqa', 'mqa', 'sqa']:
