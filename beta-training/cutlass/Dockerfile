@@ -34,10 +34,10 @@ WORKDIR /workspace
 RUN pip install --upgrade pip setuptools wheel ninja
 
 # Instalacja PyTorch 2.8.0 dla CUDA 12.8
-RUN pip install torch==2.9.0 --index-url https://download.pytorch.org/whl/cu128
+RUN pip install torch==2.9.0 --index-url https://download.pytorch.org/whl/cu130
 
-# Instalacja RxLM 0.3.60 wraz z zależnościami
-RUN pip install rxlm==0.3.64 transformers tokenizers huggingface_hub datasets tensorboard nltk
+# Instalacja RxLM 0.3.65 wraz z zależnościami
+RUN pip install rxlm==0.3.65 transformers tokenizers huggingface_hub datasets tensorboard nltk
 
 # Instalacja grouped_gemm z CUTLASS - wymuszamy architekturę H100 (9.0)
 RUN GROUPED_GEMM_CUTLASS=1 \
@@ -48,7 +48,7 @@ RUN GROUPED_GEMM_CUTLASS=1 \
 # Instalacja Flash Attention 2.8.1 ze skompilowanych źródeł
 RUN wget https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.1/flash_attn-2.8.1+cu13torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl \
     && pip install --no-dependencies --upgrade flash_attn-2.8.1+cu13torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl \
-    && rm flash_attn-2.8.3+cu12torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl
+    && rm flash_attn-2.8.3+cu13torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl
 
 RUN pip install git+https://github.com/KellerJordan/Muon
 
@@ -65,7 +65,7 @@ if python -c "import transformer_engine" 2>/dev/null; then\n\
 else\n\
     echo "Installing Transformer Engine 2.8.0"\n\
     echo "This may take 10-20 minutes..."\n\
-    pip3 install --no-build-isolation transformer-engine[pytorch]==2.8.0\n\
+    pip3 install --no-build-isolation transformer-engine[pytorch]==2.9.0\n\
     echo "Transformer Engine installed successfully!"\n\
 fi\n\
 \n\
@@ -74,7 +74,7 @@ echo "=== Starting RxT-Beta Training ==="\n\
 echo ""\n\
 \n\
 # Uruchom trening\n\
-exec torchrun --standalone --nnodes=1 --nproc-per-node=4 /workspace/training/beta.py "$@"\n' > /entrypoint.sh \
+exec .venv/bin/torchrun --standalone --nnodes=1 --nproc-per-node=8 ./beta-train-ma.py "$@"\n' > /entrypoint.sh \
     && chmod +x /entrypoint.sh
 
 # Użyj skryptu startowego jako entrypoint

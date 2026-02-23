@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-from poetry.console.commands import self
 
 from .stm import ShortTermMemory
 
