@@ -586,7 +586,7 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
                             if self.writer and self.total_steps % self.tensorboard_interval:
                                 loss_item = self.accumulated_loss / self.gradient_accumulation_steps
                                 self._train_writer(
-                                    loss_item.item() * self.gradient_accumulation_steps,
+                                    loss_item.item(),
                                     epoch_step=(batch_idx * number_of_inner_steps) + inner_step_idx,
                                     inner_step=inner_step_idx,
                                 )
