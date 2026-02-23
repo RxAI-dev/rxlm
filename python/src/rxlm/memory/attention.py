@@ -45,7 +45,7 @@ class StmMemoryAttention(nn.Module):
     ) -> torch.Tensor:
         # 1. Normalize encoded layer data
         layer_data = encoded_data[layer_idx]
-        if self.self.attention_layers[layer_idx].use_flash_attention and mask is not None:
+        if self.attention_layers[layer_idx].use_flash_attention and mask is not None:
             padding_mask = mask.squeeze(1).squeeze(1)  # [B, seq_len]
             layer_data = layer_data * padding_mask.unsqueeze(-1)  # Zero out padded query positions
             mask = None
