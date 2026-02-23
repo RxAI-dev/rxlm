@@ -37,7 +37,7 @@ RUN pip install --upgrade pip setuptools wheel ninja
 RUN pip install torch==2.9.0 --index-url https://download.pytorch.org/whl/cu128
 
 # Instalacja RxLM 0.3.60 wraz z zależnościami
-RUN pip install rxlm==0.3.60 transformers tokenizers huggingface_hub datasets tensorboard nltk
+RUN pip install rxlm==0.3.64 transformers tokenizers huggingface_hub datasets tensorboard nltk
 
 # Instalacja grouped_gemm z CUTLASS - wymuszamy architekturę H100 (9.0)
 RUN GROUPED_GEMM_CUTLASS=1 \
@@ -46,8 +46,8 @@ RUN GROUPED_GEMM_CUTLASS=1 \
     pip install grouped_gemm --no-build-isolation
 
 # Instalacja Flash Attention 2.8.1 ze skompilowanych źródeł
-RUN wget https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl \
-    && pip install --no-dependencies --upgrade flash_attn-2.8.3+cu12torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl \
+RUN wget https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.1/flash_attn-2.8.1+cu13torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl \
+    && pip install --no-dependencies --upgrade flash_attn-2.8.1+cu13torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl \
     && rm flash_attn-2.8.3+cu12torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl
 
 RUN pip install git+https://github.com/KellerJordan/Muon

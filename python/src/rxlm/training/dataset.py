@@ -2296,6 +2296,269 @@ class HybridReasoningSftDataset(Dataset):
 
         return cls(hf_dataset, tokenizer, max_seq_len=max_seq_len, **kwargs)
 
+class HybridReasoningIterableSftDataset(IterableDataset):
+    """
+    Dataset for Interaction SFT with hybrid reasoning and agentic tools support.
+
+    Supports the new RxT-Beta Interaction Template with special tokens:
+    - [Q] - query block
+    - [A] - answer block
+    - [T] - thinking/reasoning block
+    - [C] - agentic tool call
+    - [U] - agentic tool use
+    - [I] - internal instruction
+
+    The template structure is:
+    - Fast answer: [I] internal [Q] query [A] answer [C] tool_call
+    - Extended thinking: [I] internal [Q] query [T] think [A] answer [C] tool_call
+    - Tool use: [I] internal [U] tool_use [T] think [A] answer [C] tool_call
+
+    For training loss:
+    - Masked (ignored): internal, query, tool_use tokens
+    - Used for loss: think, answer, tool_call tokens
+    """
+
+    def __init__(
+            self,
+            interactions: Union[list[dict], HfDataset],
+            tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+            max_seq_len: int = 1024,
+            # Field names in dataset
+            query_field: str = 'query',
+            answer_field: str = 'answer',
+            think_field: str = 'think',
+            tool_call_field: str = 'tool_call',
+            tool_use_field: str = 'tool_use',
+            internal_field: str = 'internal',
+            # Special tokens (text versions for manual tokenization)
+            query_token: str = '[Q]',
+            answer_token: str = '[A]',
+            think_token: str = '[T]',
+            tool_call_token: str = '[C]',
+            tool_use_token: str = '[U]',
+            internal_token: str = '[I]',
+            bos_token: str = '[BOS]',
+            eos_token: str = '[EOS]',
+            # Other options
+            ignore_index: int = -100,
+            mask_prob: float = 0.15,
+            ignore_answer_special_tokens: bool = False,
+            **kwargs,
+    ):
+        super(HybridReasoningIterableSftDataset, self).__init__(**kwargs)
+        self.interactions = interactions
+        self.tokenizer = tokenizer
+        self.max_seq_len = max_seq_len
+
+        # Field names
+        self.query_field = query_field
+        self.answer_field = answer_field
+        self.think_field = think_field
+        self.tool_call_field = tool_call_field
+        self.tool_use_field = tool_use_field
+        self.internal_field = internal_field
+
+        # Special tokens
+        self.query_token = query_token
+        self.answer_token = answer_token
+        self.think_token = think_token
+        self.tool_call_token = tool_call_token
+        self.tool_use_token = tool_use_token
+        self.internal_token = internal_token
+        self.bos_token = bos_token
+        self.eos_token = eos_token
+
+        self.ignore_index = ignore_index
+        self.mask_prob = mask_prob
+        self.ignore_answer_special_tokens = ignore_answer_special_tokens
+
+        self.is_list = isinstance(self.interactions, list)
+
+    def _build_interaction_text(self, item: dict) -> str:
+        """
+        Builds the full interaction text from components.
+
+        Template structure:
+        [BOS][I]internal[Q|U]query_or_tool_use[T]think[A]answer[C]tool_call[EOS]
+
+        All components except [BOS] and [EOS] are optional.
+        """
+        parts = [self.bos_token]
+
+        # Internal instruction (optional, at the start)
+        internal = item.get(self.internal_field)
+        if internal:
+            parts.append(f"{self.internal_token}{internal}")
+
+        # Either query or tool_use (mutually exclusive)
+        tool_use = item.get(self.tool_use_field)
+        query = item.get(self.query_field)
+
+        if tool_use:
+            parts.append(f"{self.tool_use_token}{tool_use}")
+        elif query:
+            parts.append(f"{self.query_token}{query}")
+
+        # Think block (optional)
+        think = item.get(self.think_field)
+        if think:
+            parts.append(f"{self.think_token}{think}")
+
+        # Answer block (optional - might be skipped for direct tool call)
+        answer = item.get(self.answer_field)
+        if answer:
+            parts.append(f"{self.answer_token}{answer}")
+
+        # Tool call (optional, at the end)
+        tool_call = item.get(self.tool_call_field)
+        if tool_call:
+            parts.append(f"{self.tool_call_token}{tool_call}")
+
+        parts.append(self.eos_token)
+
+        return ''.join(parts)
+
+    def _create_masked_labels(self, input_ids: torch.Tensor, item: dict) -> torch.Tensor:
+        """
+        Creates masked labels for training.
+
+        Masked (ignore_index): internal, query, tool_use tokens
+        Used for loss: think, answer, tool_call tokens
+        """
+        labels = input_ids.clone()
+
+        # Get token IDs
+        query_token_id = self.tokenizer.convert_tokens_to_ids(self.query_token)
+        answer_token_id = self.tokenizer.convert_tokens_to_ids(self.answer_token)
+        think_token_id = self.tokenizer.convert_tokens_to_ids(self.think_token)
+        tool_call_token_id = self.tokenizer.convert_tokens_to_ids(self.tool_call_token)
+        tool_use_token_id = self.tokenizer.convert_tokens_to_ids(self.tool_use_token)
+        internal_token_id = self.tokenizer.convert_tokens_to_ids(self.internal_token)
+        eos_token_id = self.tokenizer.convert_tokens_to_ids(self.eos_token)
+
+        # Tokens that start sections to be masked (input sections)
+        mask_start_tokens = {query_token_id, tool_use_token_id, internal_token_id}
+        # Tokens that start sections for training (output sections)
+        train_start_tokens = {think_token_id, answer_token_id, tool_call_token_id}
+        # End tokens
+        end_tokens = {eos_token_id}
+
+        in_train_section = False
+        for i in range(len(input_ids)):
+            token = input_ids[i].item()
+
+            if token in train_start_tokens:
+                in_train_section = True
+                if self.ignore_answer_special_tokens:
+                    # Mask the special token itself
+                    labels[i] = self.ignore_index
+            elif token in mask_start_tokens:
+                in_train_section = False
+                labels[i] = self.ignore_index
+            elif token in end_tokens:
+                in_train_section = False
+            elif not in_train_section:
+                labels[i] = self.ignore_index
+
+        return labels
+
+    def get_tokenized_item(self, item: dict) -> dict:
+        # Build the full interaction text
+        text = self._build_interaction_text(item)
+
+        # Tokenize with skip_special_tokens=False to preserve our control tokens
+        inputs = self.tokenizer(
+            text,
+            max_length=self.max_seq_len,
+            truncation=True,
+            padding='max_length',
+            return_tensors='pt',
+            add_special_tokens=False,  # We control all tokens manually
+        )
+
+        input_ids = inputs['input_ids'][0]
+        attention_mask = inputs['attention_mask'][0]
+
+        # Fix any out-of-vocab tokens
+        if not (input_ids < self.tokenizer.vocab_size).all():
+            input_ids[input_ids >= self.tokenizer.vocab_size] = self.tokenizer.unk_token_id
+        if not (input_ids >= 0).all():
+            input_ids[input_ids < 0] = self.tokenizer.unk_token_id
+
+        # Create masked labels for decoder
+        decoder_targets = self._create_masked_labels(input_ids, item)
+
+        result = {
+            'input_ids': input_ids,
+            'attention_mask': attention_mask,
+            'decoder_targets': decoder_targets,
+        }
+
+        return result
+
+    def __iter__(self):
+        for example in self.interactions:
+            inputs = self.get_tokenized_item(example)
+
+            encoder_input_ids = inputs['input_ids']
+            if self.is_pre_tokenized:
+                encoder_input_ids = encoder_input_ids.clone()
+            attention_mask = inputs['attention_mask']
+
+            decoder_input_ids = encoder_input_ids.clone()
+            decoder_targets = inputs['decoder_targets']
+
+            encoder_labels = encoder_input_ids.clone()
+
+            # Create masked indices for encoder MLM
+            masked_indices = torch.bernoulli(
+                torch.full(encoder_labels.shape, self.mask_prob)
+            ).bool() & attention_mask.bool()
+
+            # Apply mask
+            encoder_labels[~masked_indices] = self.ignore_index
+            encoder_input_ids[masked_indices] = self.tokenizer.mask_token_id
+
+            yield {
+                'decoder': {
+                    'input_ids': decoder_input_ids,
+                    'targets': decoder_targets,
+                },
+                'encoder': {
+                    'input_ids': encoder_input_ids,
+                    'labels': encoder_labels,
+                },
+                'attention_mask': attention_mask,
+            }
+
+    @classmethod
+    def from_hf_hub(
+            cls,
+            dataset_id: str,
+            subset: str = None,
+            split: str = 'train',
+            tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast] = None,
+            tokenizer_hub_id: str = None,
+            max_seq_len: int = 1024,
+            load_kwargs: dict = None,
+            load_tokenizer_kwargs: dict = None,
+            **kwargs
+    ):
+        """Load dataset from HuggingFace Hub."""
+        assert tokenizer is not None or tokenizer_hub_id is not None
+
+        if load_kwargs is None:
+            load_kwargs = {}
+        if load_tokenizer_kwargs is None:
+            load_tokenizer_kwargs = {}
+
+        if tokenizer is None:
+            tokenizer = load_tokenizer_from_hf_hub(tokenizer_hub_id, **load_tokenizer_kwargs)
+
+        hf_dataset = load_dataset(dataset_id, subset, split=split, streaming=True, **load_kwargs) if subset else load_dataset(dataset_id, split=split, streaming=True, **load_kwargs)
+
+        return cls(hf_dataset, tokenizer, max_seq_len=max_seq_len, **kwargs)
+
 
 class HybridReasoningSmatDataset(Dataset):
     """
@@ -2339,6 +2602,10 @@ class HybridReasoningSmatDataset(Dataset):
             internal_token: str = '[I]',
             bos_token: str = '[BOS]',
             eos_token: str = '[EOS]',
+            use_system_prompt: bool = False,
+            system_field: str = 'system',
+            system_prompt_title: str = 'SYSTEM INSTRUCTIONS',
+            default_system_prompt: str = 'You are RxT - stateful reactive language model (RxLM) made for conversational AI',
             **kwargs,
     ):
         super(HybridReasoningSmatDataset, self).__init__(**kwargs)
@@ -2365,6 +2632,12 @@ class HybridReasoningSmatDataset(Dataset):
         self.bos_token = bos_token
         self.eos_token = eos_token
 
+        # System prompt
+        self.use_system_prompt = use_system_prompt
+        self.system_field = system_field
+        self.system_prompt_title = system_prompt_title
+        self.default_system_prompt = default_system_prompt
+
         self.is_pre_tokenized = False
         self.is_list = isinstance(self.episodes, list)
         self.inputs = []
@@ -2383,15 +2656,15 @@ class HybridReasoningSmatDataset(Dataset):
         query_parts = [self.bos_token]
 
         internal = interaction.get(self.internal_field)
-        if internal:
+        if internal and len(internal) > 0:
             query_parts.append(f"{self.internal_token}{internal}")
 
         tool_use = interaction.get(self.tool_use_field)
         query = interaction.get(self.query_field)
 
-        if tool_use:
+        if tool_use and len(tool_use) > 0:
             query_parts.append(f"{self.tool_use_token}{tool_use}")
-        elif query:
+        elif query and len(query) > 0:
             query_parts.append(f"{self.query_token}{query}")
 
         query_text = ''.join(query_parts)
@@ -2400,15 +2673,15 @@ class HybridReasoningSmatDataset(Dataset):
         answer_parts = []
 
         think = interaction.get(self.think_field)
-        if think:
+        if think and len(think) > 0:
             answer_parts.append(f"{self.think_token}{think}")
 
         answer = interaction.get(self.answer_field)
-        if answer:
+        if answer and len(answer) > 0:
             answer_parts.append(f"{self.answer_token}{answer}")
 
         tool_call = interaction.get(self.tool_call_field)
-        if tool_call:
+        if tool_call and len(tool_call) > 0:
             answer_parts.append(f"{self.tool_call_token}{tool_call}")
 
         answer_parts.append(self.eos_token)
@@ -2457,6 +2730,26 @@ class HybridReasoningSmatDataset(Dataset):
             }
         }
 
+    def _tokenize_system_prompt(self, system: str) -> dict[str, dict[str, torch.Tensor]]:
+        # Manually construct query: [BOS][Q]query
+        system_text = f"{self.bos_token}{self.internal_token}{self.system_prompt_title}\n\n{system}{self.eos_token}"
+        system_enc = self.tokenizer(
+            system_text,
+            max_length=self.max_seq_len,
+            padding='max_length',
+            truncation=True,
+            return_tensors='pt',
+            add_special_tokens=False  # Critical: We control all tokens
+        )
+
+        return {
+            'system': {
+                'input_ids': system_enc['input_ids'][0],
+                'attention_mask': system_enc['attention_mask'][0],
+            },
+
+        }
+
     def get_tokenized_item(self, idx: int, episode: dict = None) -> dict:
         if self.is_pre_tokenized:
             return self.inputs[idx]
@@ -2470,24 +2763,25 @@ class HybridReasoningSmatDataset(Dataset):
         ]
 
         # First interaction provides initial query/answer
-        if tokenized_interactions:
-            first = tokenized_interactions[0]
-            follow_ups = tokenized_interactions[1:] if len(tokenized_interactions) > 1 else []
+        first = tokenized_interactions[0]
+        follow_ups = tokenized_interactions[1:] if len(tokenized_interactions) > 1 else []
 
+        if self.use_system_prompt:
+            system_prompt = item[self.system_field] if self.system_field in item else None
+            system_enc = self._tokenize_system_prompt(system_prompt if system_prompt is not None else self.default_system_prompt)
+            return {
+                'query': first['query'],
+                'answer': first['answer'],
+                'system': system_enc,
+                'interactions': follow_ups,
+            }
+        else:
             return {
                 'query': first['query'],
                 'answer': first['answer'],
                 'interactions': follow_ups,
             }
-        else:
-            # Empty episode - return dummy data
-            empty_ids = torch.zeros(self.max_seq_len, dtype=torch.long)
-            empty_mask = torch.zeros(self.max_seq_len, dtype=torch.long)
-            return {
-                'query': {'input_ids': empty_ids, 'attention_mask': empty_mask},
-                'answer': {'input_ids': empty_ids.clone(), 'attention_mask': empty_mask.clone()},
-                'interactions': [],
-            }
+
 
     def __getitem__(self, idx: int) -> dict:
         return self.get_tokenized_item(idx)
@@ -2642,40 +2936,11 @@ class HybridReasoningSmatDataset(Dataset):
 
         batch_interactions = [x['interactions'] for x in batch]
 
-        # Handle variable-length interaction lists by padding
-        max_interactions = max(len(inters) for inters in batch_interactions)
+        transposed_interactions = list(zip(*batch_interactions))
 
-        if max_interactions > 0:
-            # Pad shorter interaction lists with dummy interactions
-            padded_interactions = []
-            for inters in batch_interactions:
-                if len(inters) < max_interactions:
-                    # Create dummy interactions for padding
-                    dummy = inters[0] if inters else {
-                        'query': {
-                            'input_ids': torch.zeros_like(batch[0]['query']['input_ids']),
-                            'attention_mask': torch.zeros_like(batch[0]['query']['attention_mask']),
-                        },
-                        'answer': {
-                            'input_ids': torch.zeros_like(batch[0]['answer']['input_ids']),
-                            'attention_mask': torch.zeros_like(batch[0]['answer']['attention_mask']),
-                        }
-                    }
-                    padded = list(inters) + [dummy] * (max_interactions - len(inters))
-                    padded_interactions.append(padded)
-                else:
-                    padded_interactions.append(inters)
-
-            transposed_interactions = list(zip(*padded_interactions))
-
-            return {
-                **collate_interaction_batch(batch),
-                'interactions': [
-                    collate_interaction_batch(list(step_batch)) for step_batch in transposed_interactions
-                ]
-            }
-        else:
-            return {
-                **collate_interaction_batch(batch),
-                'interactions': []
-            }
+        return {
+            **collate_interaction_batch(batch),
+            'interactions': [
+                collate_interaction_batch(list(step_batch)) for step_batch in transposed_interactions
+            ]
+        }

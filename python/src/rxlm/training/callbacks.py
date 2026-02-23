@@ -297,7 +297,6 @@ class ModelSaveCallback(TrainerCallback):
 
 ModelToSave: TypeAlias = Literal['decoder', 'encoder', 'head', 'mem_attn']
 
-
 class JointModelSaveCallback(TrainerCallback):
     def __init__(
             self,
@@ -353,11 +352,13 @@ class JointModelSaveCallback(TrainerCallback):
 
             if self.rank == 0:
                 if 'decoder' in self.save_models:
-                    batch_size = model.decoder.model.stm.batch_size
-                    model.decoder.model.stm.single_memory()
-                    self._save_batch(model.decoder, 'decoder', hub_id=self.hub_model_decoder, batch_idx=batch_idx)
-                    model.decoder.model.stm.batched_memory(batch_size)
+                    original_stm = model.decoder.model.stm.memory
 
+                    single_batch_memory = original_stm[:, :1, :, :].contiguous()
+
+                    model.decoder.model.stm.update_all(single_batch_memory)
+                    self._save_batch(model.decoder, 'decoder', hub_id=self.hub_model_decoder, batch_idx=batch_idx)
+                    model.decoder.model.stm.update_all(original_stm)
                 if 'encoder' in self.save_models:
                     self._save_batch(model.encoder, 'encoder', hub_id=self.hub_model_encoder, batch_idx=batch_idx)
 
@@ -365,45 +366,18 @@ class JointModelSaveCallback(TrainerCallback):
                     self._save_batch(model.mlm_head, 'head', hub_id=self.hub_model_head, batch_idx=batch_idx)
 
                 if 'mem_attn' in self.save_models:
-                    batch_size = model.memory_attention.model.stm.batch_size
-                    model.memory_attention.model.stm.single_memory()
+                    original_stm = model.memory_attention.model.stm.memory
+
+                    single_batch_memory = original_stm[:, :1, :, :].contiguous()
+                    model.memory_attention.model.stm.update_all(single_batch_memory)
                     self._save_batch(model.memory_attention, 'mem_attn', hub_id=self.hub_model_mem_attn,
                                      batch_idx=batch_idx)
-                    model.memory_attention.model.stm.batched_memory(batch_size)
+                    model.memory_attention.model.stm.update_all(original_stm)
 
             if self.use_ddp:
                 torch.distributed.barrier()
 
     def _save_batch(self, model: Union[nn.Module, PyTorchModelHubMixin], component: str, hub_id: str = None, batch_idx: int = None):
-        try:
-            if model.save_pretrained is not None:
-                ckpt_path = os.path.join(
-                    self.save_dir,
-                    component,
-                    'batch_checkpoint'
-                )
-                path_exists = os.path.exists(ckpt_path)
-                if not path_exists:
-                    os.makedirs(ckpt_path)
-                model.save_pretrained(save_directory=ckpt_path)
-            else:
-                comp_path = os.path.join(
-                    self.save_dir,
-                    component
-                )
-                path_exists = os.path.exists(comp_path)
-                if not path_exists:
-                    os.makedirs(comp_path)
-                ckpt_path = os.path.join(
-                    comp_path,
-                    'batch_checkpoint.pt'
-                )
-                os.remove(ckpt_path)
-                torch.save(model.state_dict(), ckpt_path)
-        except Exception as e:
-            print(f"Error saving batch checkpoint: {str(e)}")
-            if self.display_exc_trace:
-                traceback.print_exc()
         try:
             if self.push_to_hub and self.push_batch_checkpoint and model.push_to_hub is not None and hub_id:
                 model.push_to_hub(
@@ -429,11 +403,13 @@ class JointModelSaveCallback(TrainerCallback):
 
             if self.rank == 0:
                 if 'decoder' in self.save_models:
-                    batch_size = model.decoder.model.stm.batch_size
-                    model.decoder.model.stm.single_memory()
-                    self._save_batch(model.decoder, 'decoder', hub_id=self.hub_model_decoder, batch_idx=batch_idx)
-                    model.decoder.model.stm.batched_memory(batch_size)
+                    original_stm = model.decoder.model.stm.memory
 
+                    single_batch_memory = original_stm[:, :1, :, :].contiguous()
+
+                    model.decoder.model.stm.update_all(single_batch_memory)
+                    self._save_batch(model.decoder, 'decoder', hub_id=self.hub_model_decoder, batch_idx=batch_idx)
+                    model.decoder.model.stm.update_all(original_stm)
                 if 'encoder' in self.save_models:
                     self._save_batch(model.encoder, 'encoder', hub_id=self.hub_model_encoder, batch_idx=batch_idx)
 
@@ -441,10 +417,13 @@ class JointModelSaveCallback(TrainerCallback):
                     self._save_batch(model.mlm_head, 'head', hub_id=self.hub_model_head, batch_idx=batch_idx)
 
                 if 'mem_attn' in self.save_models:
-                    batch_size = model.memory_attention.model.stm.batch_size
-                    model.memory_attention.model.stm.single_memory()
-                    self._save_batch(model.memory_attention, 'mem_attn', hub_id=self.hub_model_mem_attn, batch_idx=batch_idx)
-                    model.memory_attention.model.stm.batched_memory(batch_size)
+                    original_stm = model.memory_attention.model.stm.memory
+
+                    single_batch_memory = original_stm[:, :1, :, :].contiguous()
+                    model.memory_attention.model.stm.update_all(single_batch_memory)
+                    self._save_batch(model.memory_attention, 'mem_attn', hub_id=self.hub_model_mem_attn,
+                                     batch_idx=batch_idx)
+                    model.memory_attention.model.stm.update_all(original_stm)
 
             if self.use_ddp:
                 torch.distributed.barrier()
@@ -518,11 +497,13 @@ class JointModelSaveCallback(TrainerCallback):
                     model = next(model.children())
 
                 if 'decoder' in self.save_models:
-                    batch_size = model.decoder.model.stm.batch_size
-                    model.decoder.model.stm.single_memory()
-                    self._save_validation(model.decoder, 'decoder', epoch, val_loss, hub_id=self.hub_model_decoder)
-                    model.decoder.model.stm.batched_memory(batch_size)
+                    original_stm = model.decoder.model.stm.memory
 
+                    single_batch_memory = original_stm[:, :1, :, :].contiguous()
+
+                    model.decoder.model.stm.update_all(single_batch_memory)
+                    self._save_validation(model.decoder, 'decoder', epoch, val_loss, hub_id=self.hub_model_decoder)
+                    model.decoder.model.stm.update_all(original_stm)
                 if 'encoder' in self.save_models:
                     self._save_validation(model.encoder, 'encoder', epoch, val_loss, hub_id=self.hub_model_encoder)
 
@@ -530,10 +511,12 @@ class JointModelSaveCallback(TrainerCallback):
                     self._save_validation(model.mlm_head, 'head', epoch, val_loss, hub_id=self.hub_model_head)
 
                 if 'mem_attn' in self.save_models:
-                    batch_size = model.memory_attention.model.stm.batch_size
-                    model.memory_attention.model.stm.single_memory()
+                    original_stm = model.memory_attention.model.stm.memory
+
+                    single_batch_memory = original_stm[:, :1, :, :].contiguous()
+                    model.memory_attention.model.stm.update_all(single_batch_memory)
                     self._save_validation(model.memory_attention, 'mem_attn', epoch, val_loss, hub_id=self.hub_model_mem_attn)
-                    model.memory_attention.model.stm.batched_memory(batch_size)
+                    model.memory_attention.model.stm.update_all(original_stm)
 
     def _save_final(self, model: Union[nn.Module, PyTorchModelHubMixin], component: str, hub_id: str = None):
         try:
@@ -583,11 +566,13 @@ class JointModelSaveCallback(TrainerCallback):
                 model = next(model.children())
 
             if 'decoder' in self.save_models:
-                batch_size = model.decoder.model.stm.batch_size
-                model.decoder.model.stm.single_memory()
-                self._save_final(model.decoder, 'decoder', hub_id=self.hub_model_decoder)
-                model.decoder.model.stm.batched_memory(batch_size)
+                original_stm = model.decoder.model.stm.memory
 
+                single_batch_memory = original_stm[:, :1, :, :].contiguous()
+
+                model.decoder.model.stm.update_all(single_batch_memory)
+                self._save_final(model.decoder, 'decoder', hub_id=self.hub_model_decoder)
+                model.decoder.model.stm.update_all(original_stm)
             if 'encoder' in self.save_models:
                 self._save_final(model.encoder, 'encoder', hub_id=self.hub_model_encoder)
 
@@ -595,10 +580,12 @@ class JointModelSaveCallback(TrainerCallback):
                 self._save_final(model.mlm_head, 'head', hub_id=self.hub_model_head)
 
             if 'mem_attn' in self.save_models:
-                batch_size = model.memory_attention.model.stm.batch_size
-                model.memory_attention.model.stm.single_memory()
+                original_stm = model.memory_attention.model.stm.memory
+
+                single_batch_memory = original_stm[:, :1, :, :].contiguous()
+                model.memory_attention.model.stm.update_all(single_batch_memory)
                 self._save_final(model.memory_attention, 'mem_attn', hub_id=self.hub_model_mem_attn)
-                model.memory_attention.model.stm.batched_memory(batch_size)
+                model.memory_attention.model.stm.update_all(original_stm)
 
 
 class EarlyStoppageCallback(TrainerCallback):

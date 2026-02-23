@@ -1,5 +1,7 @@
 import torch
 import torch.nn as nn
+from poetry.console.commands import self
+
 from .stm import ShortTermMemory
 
 
@@ -43,7 +45,13 @@ class StmMemoryAttention(nn.Module):
             mask: torch.Tensor = None,
     ) -> torch.Tensor:
         # 1. Normalize encoded layer data
-        encoded_layer_data = self.memory_input_norm_layers[layer_idx](encoded_data[layer_idx])
+        layer_data = encoded_data[layer_idx]
+        if self.self.attention_layers[layer_idx].use_flash_attention and mask is not None:
+            padding_mask = mask.squeeze(1).squeeze(1)  # [B, seq_len]
+            layer_data = layer_data * padding_mask.unsqueeze(-1)  # Zero out padded query positions
+            mask = None
+
+        encoded_layer_data = self.memory_input_norm_layers[layer_idx](layer_data)
         # 2. Normalize STM layer
         normalized_layer_stm = self.memory_norm_layers[layer_idx](layer_stm)
 
@@ -262,3 +270,74 @@ class SelfInterlayerStmMemoryAttention(StmMemoryAttention):
         self.stm.update_all(new_stm)
         return self.stm.memory
 
+
+class GroupedSelfInterlayerStmMemoryAttention(StmMemoryAttention):
+    def __init__(
+            self,
+            num_groups: int,
+            stm: ShortTermMemory,
+            attention_layers: nn.ModuleList,
+            memory_norm_layers: nn.ModuleList,
+            memory_input_norm_layers: nn.ModuleList,
+            residual_gate_layers: nn.ModuleList,
+            mean_attention_layers: nn.ModuleList,
+            mean_memory_norm_layers: nn.ModuleList,
+            mean_residual_gate_layers: nn.ModuleList,
+            interlayer_gate_layers: nn.ModuleList,
+            mean_stm_norm: nn.Module,
+            debug_mode: bool = False,
+            debug_interval: int = 10,
+            **kwargs
+    ):
+        super(GroupedSelfInterlayerStmMemoryAttention, self).__init__(
+            stm, attention_layers, memory_norm_layers, memory_input_norm_layers, residual_gate_layers,
+            debug_mode=debug_mode, debug_interval=debug_interval, **kwargs
+        )
+        self.num_groups = num_groups
+        self.layers_per_group = self.num_layers // self.num_groups
+        self.mean_attention_layers = mean_attention_layers
+        self.mean_memory_norm_layers = mean_memory_norm_layers
+        self.mean_stm_norm = mean_stm_norm
+        self.mean_residual_gate_layers = mean_residual_gate_layers
+        self.interlayer_gate_layers = interlayer_gate_layers
+        assert (len(self.mean_attention_layers) == len(self.mean_memory_norm_layers) ==
+                len(self.mean_residual_gate_layers) == len(self.interlayer_gate_layers) == self.num_layers)
+
+    def forward(self, x: torch.Tensor, attention_mask: torch.Tensor = None) -> torch.Tensor:
+        # 1. Process correct attention mask
+        if attention_mask is not None:
+            attention_mask = attention_mask.unsqueeze(1).unsqueeze(1).bool()
+        # 2. Init new empty STM
+        new_stm = torch.zeros_like(self.stm.memory)
+
+        # 3. Get memory groups
+        stm_groups = torch.stack(self.stm.memory.chunk(self.num_groups, dim=0))
+
+        # 4. Get mean STM value for layer groups
+        stm_group_means = stm_groups.mean(dim=1) # [num_groups, batch_size, stm_size, embed_dim]
+        # 5. Normalize mean STM layer
+        normalized_stm_groups = self.mean_stm_norm(stm_group_means)
+
+        # 6. Run Memory update for all layers
+        group_idx = 0
+        for i in range(self.num_layers):
+            if i % self.layers_per_group == 0 and i != 0:
+                group_idx += 1
+            # 7. Get current layer STM value
+            layer_stm = self.stm(i)
+
+            # 8. Grouped Gated self/interlayer memory attention
+            # a) normalize STM layer value
+            pre_normalized_layer_stm = self.mean_memory_norm_layers[i](layer_stm)
+            # b) combine grouped interlayer and current layer data with gate
+            self_interlayer_stm_input = self.interlayer_gate_layers[i](pre_normalized_layer_stm, normalized_stm_groups[group_idx])
+            # c) calculate attention between STM layer and combined self/interlayer state
+            self_interlayer_stm = self.mean_attention_layers[i](pre_normalized_layer_stm, self_interlayer_stm_input, self_interlayer_stm_input, mask=None)
+            # d) combine updated interlayer state with current STM state in residual gate
+            updated_layer_stm = self.mean_residual_gate_layers[i](layer_stm, self_interlayer_stm)
+
+            # 9. Main memory attention
+            new_stm[i] = self._main_attention(i, x, updated_layer_stm, mask=attention_mask)
+        # 10. Update all layers/models
+        self.stm.update_all(new_stm)
+        return self.stm.memory

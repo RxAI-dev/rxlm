@@ -4,7 +4,7 @@ import torch.nn as nn
 class ShortTermMemory(nn.Module):
     """Short-term memory module for the Attention-based Memory System"""
 
-    def __init__(self, num_layers: int, embed_dim: int, stm_size: int, init_type: str = 'normal',
+    def __init__(self, num_layers: int, embed_dim: int, stm_size: int, init_type: str = 'standard',
                  is_trainable: bool = False, *args, **kwargs):
         super(ShortTermMemory, self).__init__(*args, **kwargs)
         self.num_layers = num_layers
@@ -27,7 +27,7 @@ class ShortTermMemory(nn.Module):
         if init_type == 'normal':
             return torch.normal(0, 0.02, stm_shape)
         elif init_type == 'standard':
-            return torch.normal(0, 1, stm_shape)
+            return torch.normal(0, 1.0, stm_shape)
         elif init_type == 'uniform':
             return torch.rand(*stm_shape) * 0.02
         elif init_type == 'ones':
@@ -60,7 +60,11 @@ class ShortTermMemory(nn.Module):
             self.register_buffer('memory', trained_stm)
 
     def reset(self, init_type: str = None):
-        self.memory = self._init_tensor(init_type).to(self.memory.device, dtype=self.memory.dtype)
+        if self.init_type == 'standard':
+            stm_shape = (self.num_layers, self.batch_size, self.stm_size, self.embed_dim)
+            self.memory = torch.randn(*stm_shape, device=self.memory.device, dtype=self.memory.dtype)
+        else:
+            self.memory = self._init_tensor(init_type).to(self.memory.device, dtype=self.memory.dtype)
 
     def clone_detach_reset(self):
         self.memory = self.memory.detach().clone()

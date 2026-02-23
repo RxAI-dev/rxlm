@@ -436,6 +436,7 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
             train_only_decoder: bool = False,
             unfreeze_epochs: tuple[int, int] = (0, 0),
             use_system_prompt: bool = False,
+            use_unfreeze: bool = False,
             dataset_collate_fn: Callable[[list[Any]], dict[str, Any]] = MrlCurriculumDataset.collate_mrl_batch,
             **kwargs
     ):
@@ -453,8 +454,9 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
         self.train_only_decoder = train_only_decoder
         self.unfreeze_epochs = unfreeze_epochs
         self.use_system_prompt = use_system_prompt
+        self.use_unfreeze = use_unfreeze
 
-        if not self.train_only_decoder:
+        if not self.train_only_decoder and self.use_unfreeze:
             mem_attn_unfreeze_epoch, encoder_unfreeze_epoch = self.unfreeze_epochs
             if mem_attn_unfreeze_epoch != 0:
                 self._get_model().memory_attention.freeze()
@@ -483,7 +485,7 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
         for callback in self.callbacks:
             callback.on_epoch_start(self.model, epoch)
 
-        if not self.train_only_decoder:
+        if not self.train_only_decoder and self.use_unfreeze:
             mem_attn_unfreeze_epoch, encoder_unfreeze_epoch = self.unfreeze_epochs
             if mem_attn_unfreeze_epoch == epoch:
                 self._get_model().memory_attention.unfreeze()
@@ -654,7 +656,7 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
         router_loss = model.decoder.model.moe_router_loss()
         loss = main_loss + self.moe_aux_loss_scale * router_loss
 
-        if self.writer is not None:
+        if self.writer is not None and self.total_steps % self.tensorboard_interval:
             if self.model.training:
                 self.writer.add_scalar('Router aux loss/Train', router_loss.item(), self.total_steps)
                 self.writer.add_scalar('Model loss/Train', main_loss.item(), self.total_steps)
@@ -684,7 +686,7 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
 
         for i in range(shifted_targets.size(0)):
             end = query_lens[i].item()
-            shifted_targets[i, :end] = -100
+            shifted_targets[i, :end-1] = -100
 
         decoder_loss = F.cross_entropy(
             shifted_logits.view(-1, self.vocab_size),
@@ -825,7 +827,7 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
 
                         for i in range(shifted_targets.size(0)):
                             end = query_lens[i].item()
-                            shifted_targets[i, :end] = -100
+                            shifted_targets[i, :end-1] = -100
 
                         valid_alm_indices = shifted_targets != -100
 
