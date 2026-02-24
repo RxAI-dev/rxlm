@@ -318,6 +318,7 @@ class JointModelSaveCallback(TrainerCallback):
             use_ddp: bool = False,
             skip_readme: bool = False,
             iterative_mode: bool = False,
+            skip_final: bool = False,
     ):
         self.save_dir = save_dir
         self.max_keep = max_keep
@@ -341,6 +342,7 @@ class JointModelSaveCallback(TrainerCallback):
         self.use_ddp = use_ddp
         self.iterative_mode = iterative_mode
         self.rank = int(os.environ['RANK']) if self.use_ddp else 0
+        self.skip_final = skip_final
 
     def on_iteration_end(self, model: nn.Module, batch_idx: int) -> Union[bool, None]:
         if self.iterative_mode:
@@ -561,7 +563,7 @@ class JointModelSaveCallback(TrainerCallback):
                 traceback.print_exc()
 
     def on_training_end(self, model: Union[nn.Module, PyTorchModelHubMixin]):
-        if self.rank == 0:
+        if self.rank == 0 and not self.skip_final:
             if isinstance(model, DistributedDataParallel):
                 model = next(model.children())
 

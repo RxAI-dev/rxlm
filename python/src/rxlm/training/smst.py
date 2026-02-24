@@ -583,16 +583,16 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
                             if scheduler is not None:
                                 scheduler.step()
 
-                            if self.writer and self.total_steps % self.tensorboard_interval:
-                                loss_item = self.accumulated_loss / self.gradient_accumulation_steps
-                                self._train_writer(
-                                    loss_item.item(),
-                                    epoch_step=(batch_idx * number_of_inner_steps) + inner_step_idx,
-                                    inner_step=inner_step_idx,
-                                )
-
                             self.accumulated_loss = torch.tensor(0.0, device=self.device)
                             self.optimizer_step_count = 0
+
+                        if self.writer and self.total_steps % self.tensorboard_interval:
+                            loss_item = loss.item() * self.gradient_accumulation_steps
+                            self._train_writer(
+                                loss_item,
+                                epoch_step=(batch_idx * number_of_inner_steps) + inner_step_idx,
+                                inner_step=inner_step_idx,
+                            )
 
                         prev_query, prev_answer = self._move_multiple_batches(next_query, next_answer)
 
