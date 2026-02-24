@@ -36,6 +36,7 @@ class BaseTrainer(ABC):
             use_te_fp8: bool = False,
             fp8_history_len: int = 256,
             fp8_margin: int = 0,
+            ddp_destroy_on_end: bool = True,
     ):
         if get_batch_size is None:
             self.get_batch_size = lambda batch: batch['attention_mask'].size(0)
@@ -74,6 +75,7 @@ class BaseTrainer(ABC):
         self.use_iterable_dataset = use_iterable_dataset
         self.num_dataloader_workers = num_dataloader_workers
         self.ddp_shuffle = ddp_shuffle
+        self.ddp_destroy_on_end = ddp_destroy_on_end
         self.use_te_fp8 = use_te_fp8
         self.fp8_history_len = fp8_history_len
         self.fp8_margin = fp8_margin
@@ -167,7 +169,7 @@ class BaseTrainer(ABC):
                 if self.use_ddp:
                     dist.barrier()
 
-        if self.use_ddp:
+        if self.use_ddp and self.ddp_destroy_on_end:
             dist.destroy_process_group()
         self.is_running = False
         self.model.eval()
