@@ -45,8 +45,10 @@ from .ff import FeedForward, GatedFeedForward
 try:
     import grouped_gemm as gg
     GROUPED_GEMM_AVAILABLE = True
+    GROUPED_GEMM_ERROR_DISPLAYED = [False]
 except ImportError:
     GROUPED_GEMM_AVAILABLE = False
+    GROUPED_GEMM_ERROR_DISPLAYED = [False]
     gg = None
 
 class MoeRouter(nn.Module):
@@ -384,9 +386,10 @@ class VectorizedMoeFeedForward(nn.Module):
         self.shared_expert_dim = shared_expert_dim if shared_expert_dim is not None else hidden_dim
 
         # Warn if grouped_gemm requested but not available
-        if use_grouped_gemm and not GROUPED_GEMM_AVAILABLE:
+        if use_grouped_gemm and not GROUPED_GEMM_AVAILABLE and not GROUPED_GEMM_ERROR_DISPLAYED[0]:
             print("WARNING: grouped_gemm requested but not available. Install with: pip install grouped_gemm")
             print("Falling back to standard vectorized implementation.")
+            GROUPED_GEMM_ERROR_DISPLAYED[0] = True
 
         self.router = MoeRouter(embed_dim, num_experts, top_k)
 

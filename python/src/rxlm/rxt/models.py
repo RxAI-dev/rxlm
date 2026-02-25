@@ -1739,7 +1739,7 @@ class RxTBeta(RxTAlpha):
 
         if self.tokenizer is not None:
             self.think_token, self.tool_call_token, self.tool_use_token, self.internal_token = self.tokenizer.convert_ids_to_tokens(
-                [self.think_token_id, self.tool_call_token_id, self.tool_use_token_id, self.internal_token]
+                [self.think_token_id, self.tool_call_token_id, self.tool_use_token_id, self.internal_token_id]
             )
         else:
             self.think_token, self.tool_call_token, self.tool_use_token, self.internal_token = None, None, None, None
@@ -1747,7 +1747,7 @@ class RxTBeta(RxTAlpha):
     def set_tokenizer(self, tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast]):
         super().set_tokenizer(tokenizer)
         self.think_token, self.tool_call_token, self.tool_use_token, self.internal_token = self.tokenizer.convert_ids_to_tokens(
-            [self.think_token_id, self.tool_call_token_id, self.tool_use_token_id, self.internal_token]
+            [self.think_token_id, self.tool_call_token_id, self.tool_use_token_id, self.internal_token_id]
         )
 
     def init_model(self, system_prompt: str = None, max_seq_len: int = 8192, device: torch.device = torch.device("cpu")):
