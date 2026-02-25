@@ -64,7 +64,7 @@ class RxTComponentConfig(TypedDict):
     use_nope: Optional[bool]
     head_norm_type: Optional[str]
     router_amp: Optional[bool]
-    router_dtype: Optional[torch.dtype]
+    router_dtype: Optional[Literal['bfloat16', 'float16', 'float32']]
     use_vectorized_moe: Optional[bool]
     vectorized_moe_from_legacy: Optional[bool]
     moe_grouped_gemm: Optional[bool]
@@ -128,7 +128,7 @@ class RxTComponentBase(nn.Module):
             use_nope: bool = False,
             head_norm_type: str = 'layer_norm',
             router_amp: bool = False,
-            router_dtype: torch.dtype = torch.float32,
+            router_dtype: Literal['bfloat16', 'float16', 'float32'] = 'float32',
             use_vectorized_moe: bool = True,
             vectorized_moe_from_legacy: bool = False,
             moe_grouped_gemm: bool = True,
@@ -168,6 +168,12 @@ class RxTComponentBase(nn.Module):
         stm = ShortTermMemory(num_layers, embed_dim, stm_size) if not skip_memory_cross_attention or legacy_stm_in_encoder else None
 
         ff_activation = get_activation_layer(ff_activation)
+        if router_dtype == 'bfloat16':
+            router_torch_dtype = torch.bfloat16
+        elif router_dtype == 'float16':
+            router_torch_dtype = torch.float16
+        else:
+            router_torch_dtype = torch.float32
 
         linear_attn_heads = linear_attn_heads or att_heads
 
@@ -235,7 +241,7 @@ class RxTComponentBase(nn.Module):
                             num_shared_experts=num_shared_experts,
                             shared_expert_dim=shared_expert_dim,
                             router_amp=router_amp,
-                            router_dtype=router_dtype,
+                            router_dtype=router_torch_dtype,
                             use_vectorized_moe=use_vectorized_moe,
                             vectorized_moe_from_legacy=vectorized_moe_from_legacy,
                             moe_grouped_gemm=moe_grouped_gemm,
@@ -284,7 +290,7 @@ class RxTComponentBase(nn.Module):
                     num_shared_experts=num_shared_experts,
                     shared_expert_dim=shared_expert_dim,
                     router_amp=router_amp,
-                    router_dtype=router_dtype,
+                    router_dtype=router_torch_dtype,
                     use_vectorized_moe=use_vectorized_moe,
                     vectorized_moe_from_legacy=vectorized_moe_from_legacy,
                     moe_grouped_gemm=moe_grouped_gemm,
@@ -312,7 +318,7 @@ class RxTComponentBase(nn.Module):
                     num_shared_experts=num_shared_experts,
                     shared_expert_dim=shared_expert_dim,
                     router_amp=router_amp,
-                    router_dtype=router_dtype,
+                    router_dtype=router_torch_dtype,
                     use_vectorized_moe=use_vectorized_moe,
                     vectorized_moe_from_legacy=vectorized_moe_from_legacy,
                     moe_grouped_gemm=moe_grouped_gemm,
@@ -1293,13 +1299,17 @@ class RxTAlpha(nn.Module, PyTorchModelHubMixin, pipeline_tag="text-generation", 
     def reset_self_attn_cache(self):
         return self.decoder.model.reset_self_attn_cache()
 
-    def init_stm_state(self, input_ids: torch.Tensor, attention_mask: torch.Tensor = None, add_noise: float = 0.0, force: bool = False):
+    def update_stm(self, input_ids: torch.Tensor, attention_mask: torch.Tensor = None, add_noise: float = 0.0,
+                       force: bool = False):
         _, ed = self.encoder(input_ids, attention_mask=attention_mask)
         new_stm = ed if add_noise == 0.0 else ed + torch.randn_like(ed) * add_noise
         if force:
             self.memory_attention.model.stm.update_all(new_stm)
         else:
             self.memory_attention(new_stm, attention_mask=attention_mask)
+
+    def init_stm_state(self, input_ids: torch.Tensor, attention_mask: torch.Tensor = None, add_noise: float = 0.0, force: bool = False):
+        self.update_stm(input_ids, attention_mask, add_noise, force)
 
     def reset_stm_state(self):
         self.memory_attention.model.stm.reset()
@@ -1361,9 +1371,9 @@ class RxTAlpha(nn.Module, PyTorchModelHubMixin, pipeline_tag="text-generation", 
 
     def stringify_token(self, token_id: int, skip_special_tokens: bool = True, show_memory_update: bool = False) -> str:
         if token_id == -1:
-            return '\n [STM update]' if show_memory_update else ''
+            return '\n [Memory update]' if show_memory_update else ''
         elif token_id == -2:
-            return '\n [STM updated]' if show_memory_update else ''
+            return '\n [Memory updated]' if show_memory_update else ''
         else:
             return decode_post_process(self.tokenizer.decode([token_id], skip_special_tokens=skip_special_tokens))
 
@@ -1687,15 +1697,28 @@ class RxTAlpha(nn.Module, PyTorchModelHubMixin, pipeline_tag="text-generation", 
                 return generated_ids, generated_mask
 
 
+class RxTBetaTokenizerConfig(TypedDict):
+    bos_token_id: int
+    eos_token_id: int
+    answer_token_id: int
+    query_token_id: int
+    pad_token_id: int
+    think_token_id: int
+    tool_call_token_id: int
+    tool_use_token_id: int
+    internal_token_id: int
+
+
 class RxTBeta(RxTAlpha):
     def __init__(
             self,
             decoder_config: RxTComponentConfig,
             encoder_config: RxTComponentConfig,
             memory_attention_config: RxTInterlayerMemoryAttentionConfig,
-            tokenizer_config: RxTAlphaTokenizerConfig,
+            tokenizer_config: RxTBetaTokenizerConfig,
             tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast] = None,
             memory_attention_variant: Literal['interlayer', 'self-interlayer', 'grouped-self-interlayer'] = 'self-interlayer',
+            system_prompt_title: str = 'SYSTEM INSTRUCTIONS',
             **kwargs,
     ):
         super(RxTBeta, self).__init__(
@@ -1707,3 +1730,245 @@ class RxTBeta(RxTAlpha):
             memory_attention_variant=memory_attention_variant,
             **kwargs
         )
+
+        self.system_prompt_title = system_prompt_title
+        self.think_token_id = tokenizer_config['think_token_id']
+        self.tool_call_token_id = tokenizer_config['tool_call_token_id']
+        self.tool_use_token_id = tokenizer_config['tool_use_token_id']
+        self.internal_token_id = tokenizer_config['internal_token_id']
+
+        if self.tokenizer is not None:
+            self.think_token, self.tool_call_token, self.tool_use_token, self.internal_token = self.tokenizer.convert_ids_to_tokens(
+                [self.think_token_id, self.tool_call_token_id, self.tool_use_token_id, self.internal_token]
+            )
+        else:
+            self.think_token, self.tool_call_token, self.tool_use_token, self.internal_token = None, None, None, None
+
+    def set_tokenizer(self, tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast]):
+        super().set_tokenizer(tokenizer)
+        self.think_token, self.tool_call_token, self.tool_use_token, self.internal_token = self.tokenizer.convert_ids_to_tokens(
+            [self.think_token_id, self.tool_call_token_id, self.tool_use_token_id, self.internal_token]
+        )
+
+    def init_model(self, system_prompt: str = None, max_seq_len: int = 8192, device: torch.device = torch.device("cpu")):
+        self.share_components()
+        self.to(device)
+        if system_prompt is not None:
+            self.init_stm_state(**self.tokenize_system_prompt(system_prompt, max_seq_len, device))
+
+    def _build_query_text(self, text: str, internal: str = None):
+        if internal is not None:
+            return f'{self.bos_token}{self.internal_token}{internal}{self.query_token}{text}'
+        else:
+            return f'{self.bos_token}{self.query_token}{text}'
+
+    def tokenize_system_prompt(self, system: str, max_seq_len: int = 8192, device: torch.device = torch.device("cpu")) -> dict[str, dict[str, torch.Tensor]]:
+        # Manually construct query: [BOS][Q]query
+        system_text = f"{self.bos_token}{self.internal_token}{self.system_prompt_title}\n\n{system}{self.eos_token}"
+        system_enc = self.tokenizer(
+            system_text,
+            max_length=max_seq_len,
+            padding=False,
+            truncation=True,
+            return_tensors='pt',
+            return_attention_mask=True,
+            add_special_tokens=False  # Critical: We control all tokens
+        )
+
+        return {
+            'input_ids': system_enc['input_ids'].to(device),
+            'attention_mask': system_enc['attention_mask'].to(device),
+        }
+
+    def tokenize_query(self, text: str, max_seq_len: int = 8192, device: torch.device = torch.device("cpu"), internal: str = None):
+        tokenized = self.tokenizer(
+            self._build_query_text(text, internal),
+            max_length=max_seq_len,
+            truncation=True,
+            padding=False,
+            return_tensors='pt',
+            return_attention_mask=True,
+            add_special_tokens=False
+        )
+
+        return {
+            'input_ids': tokenized['input_ids'].to(device),
+            'attention_mask': tokenized['attention_mask'].to(device)
+        }
+
+    def tokenize_tool_result(self, text: str, max_seq_len: int = 8192, device: torch.device = torch.device("cpu"), internal: str = None):
+        if internal is not None:
+            full_text = f'{self.bos_token}{self.internal_token}{internal}{self.tool_use_token}{text}'
+        else:
+            full_text = f'{self.bos_token}{self.tool_use_token}{text}'
+
+        tokenized = self.tokenizer(
+            full_text,
+            max_length=max_seq_len,
+            truncation=True,
+            padding=False,
+            return_tensors='pt',
+            return_attention_mask=True,
+            add_special_tokens=False
+        )
+
+        return {
+            'input_ids': tokenized['input_ids'].to(device),
+            'attention_mask': tokenized['attention_mask'].to(device)
+        }
+
+    def tokenize_batch(self, texts: list[str], max_seq_len: int = 8192, device: torch.device = torch.device("cpu")):
+        tokenized = self.tokenizer(
+            [self._build_query_text(txt) for txt in texts],
+            max_length=max_seq_len,
+            truncation=True,
+            padding='max_length',
+            return_tensors='pt',
+            return_attention_mask=True,
+            add_special_tokens=False
+        )
+
+        return {
+            'input_ids': tokenized['input_ids'].to(device),
+            'attention_mask': tokenized['attention_mask'].to(device)
+        }
+
+    def tokenize_full_interaction(
+            self, query: str = None, answer: str = None, think: str = None, tool_call: str = None, tool_use: str = None, internal: str = None,
+            max_seq_len: int = 8192, device: torch.device = torch.device("cpu")
+    ):
+        assert query is not None or tool_use is not None, 'Full interaction should contain query or tool_use'
+        assert (query is None or tool_use is not None) or (query is not None or tool_use is None), 'Full interaction cannot contain both query and tool_use'
+
+        interaction_parts = [self.bos_token]
+
+        if internal and len(internal) > 0:
+            interaction_parts.append(f"{self.internal_token}{internal}")
+
+        if tool_use and len(tool_use) > 0:
+            interaction_parts.append(f"{self.tool_use_token}{tool_use}")
+        elif query and len(query) > 0:
+            interaction_parts.append(f"{self.query_token}{query}")
+
+        if think and len(think) > 0:
+            interaction_parts.append(f"{self.think_token}{think}")
+
+        if answer and len(answer) > 0:
+            interaction_parts.append(f"{self.answer_token}{answer}")
+
+        if tool_call and len(tool_call) > 0:
+            interaction_parts.append(f"{self.tool_call_token}{tool_call}")
+
+        interaction_parts.append(self.eos_token)
+
+        interaction_text = ''.join(interaction_parts)
+
+        tokenized = self.tokenizer(
+            interaction_text,
+            max_length=max_seq_len,
+            truncation=True,
+            padding=False,
+            return_tensors='pt',
+            return_attention_mask=True,
+            add_special_tokens=False
+        )
+
+        return {
+            'input_ids': tokenized['input_ids'].to(device),
+            'attention_mask': tokenized['attention_mask'].to(device)
+        }
+
+    def _generate_single_token(
+            self,
+            input_ids: torch.Tensor,
+            temperature: float,
+            top_k: int,
+            top_p: float,
+            attention_mask: torch.Tensor,
+            stm_kv_cache: list[tuple[torch.Tensor, torch.Tensor]] = None,
+            use_self_attn_cache: bool = True,
+            init_step: bool = False,
+            is_auto_thinking: bool = False,
+    ) -> tuple[int, torch.Tensor, torch.Tensor]:
+        device = input_ids.device
+
+        # Forward pass to get next token logits
+        outputs = self.forward(
+            input_ids[:, -1].unsqueeze(0) if not init_step else input_ids, attention_mask=attention_mask[:, -1].unsqueeze(0) if not init_step else attention_mask, stm_kv_cache=stm_kv_cache,
+            use_self_attn_cache=use_self_attn_cache, action=RxTForwardAction.DECODE, current_positions=torch.tensor([[input_ids.size(-1)]]).to(input_ids.device) if not init_step else None
+        )
+
+        if is_auto_thinking:
+            answer_token_logits = outputs[:, -1, self.answer_token_id]
+            think_token_logits = outputs[:, -1, self.think_token_id]
+
+            if answer_token_logits > think_token_logits:
+                next_token = self.answer_token_id
+            else:
+                next_token = self.think_token_id
+        else:
+            next_token_logits = outputs[:, -1, :]  # Get logits for next token
+            # Apply sampling
+            next_token = sample(
+                next_token_logits,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+            )
+            next_token = next_token.item()  # Extract scalar token
+
+        next_token_ten = torch.tensor([[next_token]], device=device)
+        next_input_ids = torch.cat([input_ids, next_token_ten], dim=1)
+        new_one = torch.ones(1, 1, dtype=torch.bool, device=device)
+        next_mask = torch.cat([attention_mask, new_one], dim=1) if attention_mask is not None else None
+
+        # Yield the generated token
+        return (
+            next_token,
+            next_input_ids,
+            next_mask
+        )
+
+    def interact(
+            self,
+            input_ids: torch.Tensor,
+            attention_mask: torch.Tensor = None,
+            thinking_mode: Literal['auto', 'extended', 'fast'] = 'auto',
+            temperature: float = 1.0,
+            top_k: Optional[int] = None,
+            top_p: Optional[float] = None,
+            max_seq_len: int = 8192,
+            use_self_attn_cache: bool = True,
+    ) -> Iterator[int]:
+        assert self.batch_size == 1 and input_ids.size(0) == 1, 'Batch size must be 1 in single interaction mode'
+
+        with torch.no_grad():
+            self.reset_self_attn_cache()
+
+            stm_kv_cache = self.prepare_stm_kv_cache()
+
+            if thinking_mode != 'auto':
+                special_token = self.answer_token_id if thinking_mode == 'fast' else self.think_token_id
+                input_ids = torch.cat([input_ids, torch.tensor([[special_token]]).to(input_ids.device)], dim=-1)
+                attention_mask = torch.cat([attention_mask, torch.ones(1, 1, device=attention_mask.device)], dim=-1)
+
+            for i in range(max_seq_len - input_ids.size(-1)):
+                next_token, input_ids, attention_mask = self._generate_single_token(
+                    input_ids, temperature, top_k, top_p, attention_mask,
+                    stm_kv_cache=stm_kv_cache, use_self_attn_cache=use_self_attn_cache,
+                    init_step=i == 0 or not use_self_attn_cache, is_auto_thinking=thinking_mode=='auto'
+                )
+
+                if i == 0:
+                    if thinking_mode == 'extended':
+                        yield self.think_token_id
+                    elif thinking_mode == 'fast':
+                        yield self.answer_token_id
+
+                yield next_token
+                if next_token == self.eos_token_id:
+                    break
+
+            yield -1 # start memory update
+            self.forward(input_ids, attention_mask=attention_mask, action=RxTForwardAction.UPDATE) # input_ids and attention_mask are already accumulated
+            yield -2 # finished memory update

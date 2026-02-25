@@ -2747,7 +2747,6 @@ class HybridReasoningSmatDataset(Dataset):
                 'input_ids': system_enc['input_ids'][0],
                 'attention_mask': system_enc['attention_mask'][0],
             },
-
         }
 
     def get_tokenized_item(self, idx: int, episode: dict = None) -> dict:
