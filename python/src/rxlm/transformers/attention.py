@@ -25,11 +25,18 @@ class MultiHeadAttention(nn.Module):
             use_output_bias: bool = True, # legacy compatibility - switch in model setting. Will be changed to False in next versions
             use_gated_attention: bool = False,
             gated_attention_activation: str = 'sigmoid',
+            head_dim: int = None,
+            use_qk_norm: bool = False,
             *args,
             **kwargs,
     ):
         super(MultiHeadAttention, self).__init__(*args, **kwargs)
-        assert embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads"
+        if head_dim is None:
+            assert embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads"
+            self.head_dim = embed_dim // num_heads
+        else:
+            self.head_dim = head_dim
+
         self.embed_dim = embed_dim
         self.num_heads = num_heads
 
@@ -39,7 +46,7 @@ class MultiHeadAttention(nn.Module):
         self.use_output_bias = use_output_bias
         if use_relative_embeddings:
             self.use_flash_attention = False
-            self.rel_embed = RelativePositionalEmbedding(max_seq_len, embed_dim // num_heads)
+            self.rel_embed = RelativePositionalEmbedding(max_seq_len, self.head_dim)
             self.rope = None
             self.rope_only_for_query = False
             self.rope_only_for_keys = False
@@ -64,37 +71,50 @@ class MultiHeadAttention(nn.Module):
             self.gated_attention_activation = None
             self.gate_proj = None
             self.gate_activation = None
+        # from v0.3.80 - QK Norm
+        self.use_qk_norm = use_qk_norm
+        if self.use_qk_norm:
+            self.q_norm = nn.RMSNorm(self.head_dim)
+            self.k_norm = nn.RMSNorm(self.head_dim)
+
 
     def _init_q(self, embed_dim: int):
         """Initialize query projection"""
-        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=self.use_bias)
+        self.q_proj = nn.Linear(embed_dim, self.head_dim * self.num_heads, bias=self.use_bias)
 
     def _init_kv(self, embed_dim: int):
         """Initialize key and value projections"""
-        self.k_proj = nn.Linear(embed_dim, embed_dim, bias=self.use_bias)
-        self.v_proj = nn.Linear(embed_dim, embed_dim, bias=self.use_bias)
+        self.k_proj = nn.Linear(embed_dim, self.head_dim * self.num_heads, bias=self.use_bias)
+        self.v_proj = nn.Linear(embed_dim, self.head_dim * self.num_heads, bias=self.use_bias)
 
     def _init_out(self, embed_dim: int):
         """Initialize output projection"""
-        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=self.use_output_bias)
+        self.out_proj = nn.Linear(self.head_dim * self.num_heads, embed_dim, bias=self.use_output_bias)
 
     def _init_gate(self, embed_dim: int):
         """Initialize gated attention"""
-        self.gate_proj = nn.Linear(embed_dim, embed_dim, bias=self.use_bias)
+        self.gate_proj = nn.Linear(embed_dim, self.head_dim * self.num_heads, bias=self.use_bias)
         self.gate_activation = get_activation_layer(self.gated_attention_activation)
         nn.init.normal_(self.gate_proj.weight, mean=1.0, std=0.01)
 
-    def split_kv_head(self, projected: torch.Tensor, b: int, t: int, d: int) -> torch.Tensor:
-        return projected.view(b, -1, self.num_heads, d // self.num_heads).transpose(1, 2)
+    def split_kv_head(self, projected: torch.Tensor, b: int, t: int) -> torch.Tensor:
+        return projected.view(b, -1, self.num_heads, self.head_dim).transpose(1, 2)
 
-    def _split_q_head(self, projected: torch.Tensor, b: int, t: int, d: int) -> torch.Tensor:
-        return projected.view(b, t, self.num_heads, d // self.num_heads).transpose(1, 2)
+    def _split_q_head(self, projected: torch.Tensor, b: int, t: int) -> torch.Tensor:
+        return projected.view(b, t, self.num_heads, self.head_dim).transpose(1, 2)
 
-    def _forward_qkv(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, b: int, t: int, d: int, stm_kv_cache: tuple[torch.Tensor, torch.Tensor] = None):
+    def _apply_qk_norm(self, q: torch.Tensor, k: torch.Tensor):
+        if self.use_qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+        return q, k
+
+    def _forward_qkv(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, b: int, t: int, stm_kv_cache: tuple[torch.Tensor, torch.Tensor] = None):
         """Forward pass through query, key, and value projections, and split the results into heads"""
-        q = self._split_q_head(self.q_proj(query), b, t, d)
-        k = self.split_kv_head(self.k_proj(key), b, t, d) if stm_kv_cache is None else stm_kv_cache[0]
-        v = self.split_kv_head(self.v_proj(value), b, t, d) if stm_kv_cache is None else stm_kv_cache[1]
+        q = self._split_q_head(self.q_proj(query), b, t)
+        k = self.split_kv_head(self.k_proj(key), b, t) if stm_kv_cache is None else stm_kv_cache[0]
+        v = self.split_kv_head(self.v_proj(value), b, t) if stm_kv_cache is None else stm_kv_cache[1]
+
         return q, k, v
 
     def _apply_rope(self, q: torch.Tensor, k: torch.Tensor, separate: bool = False):
@@ -109,10 +129,10 @@ class MultiHeadAttention(nn.Module):
                 q, k = self.rope(q, k)
         return q, k
 
-    def _calculate_attn_weights(self, q: torch.Tensor, k: torch.Tensor, d: int, mask: torch.Tensor = None):
+    def _calculate_attn_weights(self, q: torch.Tensor, k: torch.Tensor, mask: torch.Tensor = None):
         """Calculate attention weights using scaled dot-product attention"""
         q, k = self._apply_rope(q, k)
-        attn_logits = torch.matmul(q, k.transpose(-2, -1)) / (d // self.num_heads) ** 0.5
+        attn_logits = torch.matmul(q, k.transpose(-2, -1)) / (self.head_dim ** 0.5)
         if mask is not None:
             attn_logits = attn_logits.masked_fill(mask == 0, float('-inf'))
         return F.softmax(attn_logits, dim=-1)
@@ -186,11 +206,14 @@ class MultiHeadAttention(nn.Module):
             current_positions: torch.Tensor = None,
     ):
         b, t, d = query.size()
-        q = self._split_q_head(self.q_proj(query), b, t, d)
+        q = self._split_q_head(self.q_proj(query), b, t)
 
         if self.key_cache is None and self.value_cache is None:
-            k = self.split_kv_head(self.k_proj(key), b, t, d)
-            v = self.split_kv_head(self.v_proj(value), b, t, d)
+            k = self.split_kv_head(self.k_proj(key), b, t)
+            v = self.split_kv_head(self.v_proj(value), b, t)
+
+            q, k = self._apply_qk_norm(q, k)
+
             q, k = self._apply_rope(q, k)
 
             self.key_cache = torch.zeros(b, k.size(1), self.rope.max_seq_len, k.size(-1), device=k.device, dtype=k.dtype)
@@ -202,8 +225,11 @@ class MultiHeadAttention(nn.Module):
             self.mask_cache[:, :, :, :t] = mask
             attn_output = self._calculate_attention(q, k, v, b, t, d, mask=mask, generate_mode=False)
         else:
-            new_k = self.split_kv_head(self.k_proj(key), b, t, d)
-            new_v = self.split_kv_head(self.v_proj(value), b, t, d)
+            new_k = self.split_kv_head(self.k_proj(key), b, t)
+            new_v = self.split_kv_head(self.v_proj(value), b, t)
+
+            q, new_k = self._apply_qk_norm(q, new_k)
+
             q, new_k = self.rope.forward_on(q, new_k, current_positions)
 
             batch_range = torch.arange(b, device=q.device)
@@ -237,7 +263,10 @@ class MultiHeadAttention(nn.Module):
             return self._forward_with_inner_cache(query, key, value, mask=mask, current_positions=current_positions)
 
         b, t, d = query.size()
-        q, k, v = self._forward_qkv(query, key, value, b, t, d, stm_kv_cache=stm_kv_cache)
+        q, k, v = self._forward_qkv(query, key, value, b, t, stm_kv_cache=stm_kv_cache)
+
+        q, k = self._apply_qk_norm(q, k)
+
         if not self.rel_embed:
             if not stm_kv_cache or t != 1:
                 q, k = self._apply_rope(q, k)
@@ -271,6 +300,7 @@ class GroupedQueryAttention(MultiHeadAttention):
             use_flash_attention: bool = False,
             is_causal: bool = False,
             use_bias: bool = False,
+            head_dim: int = None,
             *args,
             **kwargs,
     ):
@@ -286,38 +316,38 @@ class GroupedQueryAttention(MultiHeadAttention):
             use_flash_attention=use_flash_attention,
             is_causal=is_causal,
             use_bias=use_bias,
+            head_dim=head_dim,
             *args,
             **kwargs,
         )
         assert num_heads % num_groups == 0, "num_heads must be divisible by num_groups"
 
     def _init_kv(self, embed_dim: int):
-        self.k_proj = nn.Linear(embed_dim, embed_dim // (self.num_heads // self.num_groups), bias=self.use_bias)
-        self.v_proj = nn.Linear(embed_dim, embed_dim // (self.num_heads // self.num_groups), bias=self.use_bias)
+        self.k_proj = nn.Linear(embed_dim, self.head_dim * self.num_groups, bias=self.use_bias)
+        self.v_proj = nn.Linear(embed_dim, self.head_dim * self.num_groups, bias=self.use_bias)
 
-    def split_kv_head(self, projected: torch.Tensor, b: int, t: int, d: int) -> torch.Tensor:
-        return projected.view(b, -1, self.num_groups, d // self.num_heads).transpose(1, 2)
+    def split_kv_head(self, projected: torch.Tensor, b: int, t: int) -> torch.Tensor:
+        return projected.view(b, -1, self.num_groups, self.head_dim).transpose(1, 2)
 
-    def _split_q_head(self, projected: torch.Tensor, b: int, t: int, d: int) -> torch.Tensor:
-        return projected.view(b, t, self.num_heads, d // self.num_heads).transpose(1, 2)
+    def _split_q_head(self, projected: torch.Tensor, b: int, t: int) -> torch.Tensor:
+        return projected.view(b, t, self.num_heads, self.head_dim).transpose(1, 2)
 
-    def _forward_qkv(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, b: int, t: int, d: int, stm_kv_cache: tuple[torch.Tensor, torch.Tensor] = None):
+    def _forward_qkv(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, b: int, t: int, stm_kv_cache: tuple[torch.Tensor, torch.Tensor] = None):
         """Override query, key, and value projections for GQA case - split data into heads and groups"""
         if not self.rel_embed:
-            q = self._split_q_head(self.q_proj(query), b, t, d)
-            k = self.split_kv_head(self.k_proj(key), b, t, d) if stm_kv_cache is None else stm_kv_cache[0]
-            v = self.split_kv_head(self.v_proj(value), b, t, d) if stm_kv_cache is None else stm_kv_cache[1]
+            q = self._split_q_head(self.q_proj(query), b, t)
+            k = self.split_kv_head(self.k_proj(key), b, t) if stm_kv_cache is None else stm_kv_cache[0]
+            v = self.split_kv_head(self.v_proj(value), b, t) if stm_kv_cache is None else stm_kv_cache[1]
         else:
             # Relative embedding version is not working without this strange mapping - it will be removed in next versions
             group_heads = self.num_heads // self.num_groups
-            head_dim = d // self.num_heads
 
             # Process Q
-            q = self.q_proj(query).view(b, t, self.num_groups, group_heads, head_dim).permute(0, 2, 3, 1,
+            q = self.q_proj(query).view(b, t, self.num_groups, group_heads, self.head_dim).permute(0, 2, 3, 1,
                                                                                               4)  # (B, G, group_heads, T, head_dim)
             # Process K and V
-            k = self.split_kv_head(self.k_proj(key), b, t, d) if stm_kv_cache is None else stm_kv_cache[0]  # (B, G, S, head_dim)
-            v = self.split_kv_head(self.v_proj(value), b, t, d) if stm_kv_cache is None else stm_kv_cache[1]  # (B, G, S, head_dim)
+            k = self.split_kv_head(self.k_proj(key), b, t) if stm_kv_cache is None else stm_kv_cache[0]  # (B, G, S, head_dim)
+            v = self.split_kv_head(self.v_proj(value), b, t) if stm_kv_cache is None else stm_kv_cache[1]  # (B, G, S, head_dim)
 
             # Expand and flatten to 4D tensors
             k = k.unsqueeze(2).expand(-1, -1, group_heads, -1, -1)  # (B, G, group_heads, S, head_dim)
@@ -353,6 +383,7 @@ class MultiQueryAttention(MultiHeadAttention):
             use_flash_attention: bool = False,
             is_causal: bool = False,
             use_bias: bool = False,
+            head_dim: int = None,
             *args,
             **kwargs,
     ):
@@ -367,32 +398,33 @@ class MultiQueryAttention(MultiHeadAttention):
             use_flash_attention=use_flash_attention,
             is_causal=is_causal,
             use_bias=use_bias,
+            head_dim=head_dim,
             *args,
             **kwargs
         )
 
     def _init_kv(self, embed_dim: int):
         """Override key/value initialization for MQA case"""
-        self.k_proj = nn.Linear(embed_dim, embed_dim // self.num_heads, bias=self.use_bias)
-        self.v_proj = nn.Linear(embed_dim, embed_dim // self.num_heads, bias=self.use_bias)
+        self.k_proj = nn.Linear(embed_dim, self.head_dim, bias=self.use_bias)
+        self.v_proj = nn.Linear(embed_dim, self.head_dim, bias=self.use_bias)
 
-    def split_kv_head(self, projected: torch.Tensor, b: int, t: int, d: int) -> torch.Tensor:
-        return projected.view(b, -1, 1, d // self.num_heads).transpose(1, 2)
+    def split_kv_head(self, projected: torch.Tensor, b: int, t: int) -> torch.Tensor:
+        return projected.view(b, -1, 1, self.head_dim).transpose(1, 2)
 
-    def _split_q_head(self, projected: torch.Tensor, b: int, t: int, d: int) -> torch.Tensor:
-        return projected.view(b, t, self.num_heads, d // self.num_heads).transpose(1, 2)
+    def _split_q_head(self, projected: torch.Tensor, b: int, t: int) -> torch.Tensor:
+        return projected.view(b, t, self.num_heads, self.head_dim).transpose(1, 2)
 
-    def _forward_qkv(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, b: int, t: int, d: int, stm_kv_cache: tuple[torch.Tensor, torch.Tensor] = None):
+    def _forward_qkv(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, b: int, t: int, stm_kv_cache: tuple[torch.Tensor, torch.Tensor] = None):
         """Override query, key, and value projections for GQA case - use multiple heads
         for query and single for key/values"""
         if not self.rel_embed:
-            q = self._split_q_head(self.q_proj(query), b, t, d)
-            k = self.split_kv_head(self.k_proj(key), b, t, d) if stm_kv_cache is None else stm_kv_cache[0]
-            v = self.split_kv_head(self.v_proj(value), b, t, d) if stm_kv_cache is None else stm_kv_cache[1]
+            q = self._split_q_head(self.q_proj(query), b, t)
+            k = self.split_kv_head(self.k_proj(key), b, t) if stm_kv_cache is None else stm_kv_cache[0]
+            v = self.split_kv_head(self.v_proj(value), b, t) if stm_kv_cache is None else stm_kv_cache[1]
         else:
-            q = self._split_q_head(self.q_proj(query), b, t, d)
-            k = (self.split_kv_head(self.k_proj(key), b, t, d) if stm_kv_cache is None else stm_kv_cache[0]).expand(-1, self.num_heads, -1, -1)
-            v = (self.split_kv_head(self.v_proj(value), b, t, d) if stm_kv_cache is None else stm_kv_cache[1]).expand(-1, self.num_heads, -1, -1)
+            q = self._split_q_head(self.q_proj(query), b, t)
+            k = (self.split_kv_head(self.k_proj(key), b, t) if stm_kv_cache is None else stm_kv_cache[0]).expand(-1, self.num_heads, -1, -1)
+            v = (self.split_kv_head(self.v_proj(value), b, t) if stm_kv_cache is None else stm_kv_cache[1]).expand(-1, self.num_heads, -1, -1)
         return q, k, v
 
     def _calculate_attention(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, b: int, t: int, d: int, mask: torch.Tensor = None, generate_mode: bool = False):
@@ -421,6 +453,7 @@ class SparseQueryAttention(MultiHeadAttention):
             use_flash_attention: bool = False,
             is_causal: bool = False,
             use_bias: bool = False,
+            head_dim: int = None,
             *args,
             **kwargs,
     ):
@@ -437,31 +470,32 @@ class SparseQueryAttention(MultiHeadAttention):
             use_flash_attention=use_flash_attention,
             is_causal=is_causal,
             use_bias=use_bias,
+            head_dim=head_dim,
             *args,
             **kwargs,
         )
         assert num_heads % num_groups == 0, "num_heads must be divisible by num_groups"
 
     def _init_kv(self, embed_dim: int):
-        self.k_proj = nn.Linear(embed_dim, embed_dim // (self.num_heads // self.num_groups), bias=self.use_bias)
-        self.v_proj = nn.Linear(embed_dim, embed_dim // (self.num_heads // self.num_groups), bias=self.use_bias)
+        self.k_proj = nn.Linear(embed_dim, self.head_dim * self.num_groups, bias=self.use_bias)
+        self.v_proj = nn.Linear(embed_dim, self.head_dim * self.num_groups, bias=self.use_bias)
 
     def _init_q(self, embed_dim: int):
-        self.q_proj = nn.Linear(embed_dim, embed_dim // (self.num_heads // self.num_query_groups), bias=self.use_bias)
+        self.q_proj = nn.Linear(embed_dim, self.head_dim * self.num_query_groups, bias=self.use_bias)
 
     def _init_out(self, embed_dim: int):
         """Initialize output projection"""
         if self.num_query_groups < self.num_groups:
             # revSQA
-            self.out_proj = nn.Linear(embed_dim // (self.num_heads // self.num_groups), embed_dim, bias=self.use_output_bias)
+            self.out_proj = nn.Linear(self.head_dim * self.num_groups, embed_dim, bias=self.use_output_bias)
         else:
-            self.out_proj = nn.Linear(embed_dim // (self.num_heads // self.num_query_groups), embed_dim, bias=self.use_output_bias)
+            self.out_proj = nn.Linear(self.head_dim * self.num_query_groups, embed_dim, bias=self.use_output_bias)
 
     def _init_gate(self, embed_dim: int):
         if self.num_query_groups < self.num_groups:
-            self.gate_proj = nn.Linear(embed_dim, embed_dim // (self.num_heads // self.num_groups), bias=self.use_bias)
+            self.gate_proj = nn.Linear(embed_dim, self.head_dim * self.num_groups, bias=self.use_bias)
         else:
-            self.gate_proj = nn.Linear(embed_dim, embed_dim // (self.num_heads // self.num_query_groups), bias=self.use_bias)
+            self.gate_proj = nn.Linear(embed_dim, self.head_dim * self.num_query_groups, bias=self.use_bias)
         nn.init.normal_(self.gate_proj.weight, mean=1.0, std=0.01)
         self.gate_activation = get_activation_layer(self.gated_attention_activation)
 
@@ -469,33 +503,32 @@ class SparseQueryAttention(MultiHeadAttention):
         """Transpose attention output back to (B, T, D) shape"""
         if self.num_query_groups < self.num_groups:
             # revSQA
-            return attn_output.transpose(1, 2).contiguous().view(b, t, d // (self.num_heads // self.num_groups))
+            return attn_output.transpose(1, 2).contiguous().view(b, t, self.head_dim * self.num_groups)
         else:
-            return attn_output.transpose(1, 2).contiguous().view(b, t, d // (self.num_heads // self.num_query_groups))
+            return attn_output.transpose(1, 2).contiguous().view(b, t, self.head_dim * self.num_query_groups)
 
-    def split_kv_head(self, projected: torch.Tensor, b: int, t: int, d: int) -> torch.Tensor:
-        return projected.view(b, -1, self.num_groups, d // self.num_heads).transpose(1, 2)
+    def split_kv_head(self, projected: torch.Tensor, b: int, t: int) -> torch.Tensor:
+        return projected.view(b, -1, self.num_groups, self.head_dim).transpose(1, 2)
 
-    def _split_q_head(self, projected: torch.Tensor, b: int, t: int, d: int) -> torch.Tensor:
-        return projected.view(b, t, self.num_query_groups, d // self.num_heads).transpose(1, 2)
+    def _split_q_head(self, projected: torch.Tensor, b: int, t: int) -> torch.Tensor:
+        return projected.view(b, t, self.num_query_groups, self.head_dim).transpose(1, 2)
 
-    def _forward_qkv(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, b: int, t: int, d: int, stm_kv_cache: tuple[torch.Tensor, torch.Tensor] = None):
+    def _forward_qkv(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, b: int, t: int, stm_kv_cache: tuple[torch.Tensor, torch.Tensor] = None):
         """Override query, key, and value projections for GQA case - split data into heads and groups"""
         if not self.rel_embed:
-            q = self._split_q_head(self.q_proj(query), b, t, d)
-            k = self.split_kv_head(self.k_proj(key), b, t, d) if stm_kv_cache is None else stm_kv_cache[0]
-            v = self.split_kv_head(self.v_proj(value), b, t, d) if stm_kv_cache is None else stm_kv_cache[1]
+            q = self._split_q_head(self.q_proj(query), b, t)
+            k = self.split_kv_head(self.k_proj(key), b, t) if stm_kv_cache is None else stm_kv_cache[0]
+            v = self.split_kv_head(self.v_proj(value), b, t) if stm_kv_cache is None else stm_kv_cache[1]
         else:
             # Relative embedding version is not working without this strange mapping - it will be removed in next versions
             group_heads = self.num_heads // self.num_groups
             query_heads = self.num_heads // self.num_query_groups
-            head_dim = d // self.num_heads
             # Process Q
-            q = self._split_q_head(self.q_proj(query), b, t, d)  # (B, Q_G, T, head_dim)
+            q = self._split_q_head(self.q_proj(query), b, t)  # (B, Q_G, T, head_dim)
 
             # Process K and V
-            k = self.split_kv_head(self.k_proj(key), b, t, d) if stm_kv_cache is None else stm_kv_cache[0]  # (B, G, S, head_dim)
-            v = self.split_kv_head(self.v_proj(value), b, t, d) if stm_kv_cache is None else stm_kv_cache[1]  # (B, G, S, head_dim)
+            k = self.split_kv_head(self.k_proj(key), b, t) if stm_kv_cache is None else stm_kv_cache[0]  # (B, G, S, head_dim)
+            v = self.split_kv_head(self.v_proj(value), b, t) if stm_kv_cache is None else stm_kv_cache[1]  # (B, G, S, head_dim)
 
             # Expand and flatten to 4D tensors
             q = q.unsqueeze(2).expand(-1, -1, query_heads, -1, -1)  # (B, Q_G, query_heads, T, head_dim)

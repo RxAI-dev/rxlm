@@ -47,6 +47,25 @@ class GatedFeedForward(nn.Module):
         return self.fc2(x)
 
 
+class GatedFeedForward2(nn.Module):
+    """Gated feed-forward layer with activation function and optional dropout"""
+
+    def __init__(self, embed_dim: int, hidden_dim: int, activation: nn.Module, dropout: float = 0.0, use_bias: bool = True, *args, **kwargs):
+        super(GatedFeedForward2, self).__init__(*args, **kwargs)
+        self.up_proj = nn.Linear(embed_dim, hidden_dim, bias=use_bias)
+        self.gate_proj = nn.Linear(embed_dim, hidden_dim, bias=use_bias)
+        self.down_proj = nn.Linear(hidden_dim, embed_dim, bias=use_bias)
+        self.activation = activation
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        l = self.up_proj(x)
+        g = self.gate_proj(x)
+        h = l * self.activation(g)
+        h = self.dropout(h)
+        return self.down_proj(h)
+
+
 def get_activation_layer(activation: str):
     if activation == 'relu':
         return nn.ReLU()
