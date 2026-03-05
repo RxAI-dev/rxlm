@@ -164,8 +164,8 @@ class ReactiveTransformerDecoder(ReactiveTransformerBase):
             projected_value = self.shared_layers[i].memory_cross_attention.v_proj(normalized_layer_stm)
 
             b, t, d = layer_stm.size()
-            mapped_key = self.shared_layers[i].memory_cross_attention.split_kv_head(projected_key, b, t, d)
-            mapped_value = self.shared_layers[i].memory_cross_attention.split_kv_head(projected_value, b, t, d)
+            mapped_key = self.shared_layers[i].memory_cross_attention.split_kv_head(projected_key, b, t)
+            mapped_value = self.shared_layers[i].memory_cross_attention.split_kv_head(projected_value, b, t)
 
             stm_kv_cache.append((mapped_key, mapped_value))
 
@@ -176,8 +176,8 @@ class ReactiveTransformerDecoder(ReactiveTransformerBase):
             projected_value = self.layers[i].memory_cross_attention.v_proj(normalized_layer_stm)
 
             b, t, d = layer_stm.size()
-            mapped_key = self.layers[i].memory_cross_attention.split_kv_head(projected_key, b, t, d)
-            mapped_value = self.layers[i].memory_cross_attention.split_kv_head(projected_value, b, t, d)
+            mapped_key = self.layers[i].memory_cross_attention.split_kv_head(projected_key, b, t)
+            mapped_value = self.layers[i].memory_cross_attention.split_kv_head(projected_value, b, t)
 
             stm_kv_cache.append((mapped_key, mapped_value))
 

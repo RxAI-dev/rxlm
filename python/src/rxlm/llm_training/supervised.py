@@ -1,4 +1,5 @@
 import numpy as np
+from datetime import datetime
 import torch
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel
@@ -119,6 +120,7 @@ class AutoregressiveTrainer(BaseTrainer):
             moe_aux_loss_scale: float = 0.01,
             use_f1_metrics: bool = False,
             is_sft: bool = False,
+            returns_hidden_states: bool = False,
             **kwargs
     ):
         super(AutoregressiveTrainer, self).__init__(model, device, use_amp=use_amp, dtype=dtype,
@@ -128,6 +130,7 @@ class AutoregressiveTrainer(BaseTrainer):
         self.moe_aux_loss_scale = moe_aux_loss_scale
         self.use_f1_metrics = use_f1_metrics
         self.is_sft = is_sft
+        self.returns_hidden_states = returns_hidden_states
 
 
     def compute_loss(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
@@ -135,10 +138,16 @@ class AutoregressiveTrainer(BaseTrainer):
         attention_mask = batch['attention_mask']
         targets = batch['targets']
 
-        outputs = self.model(
-            inputs,
-            attention_mask=attention_mask
-        )
+        if self.returns_hidden_states:
+            outputs, _ = self.model(
+                inputs,
+                attention_mask=attention_mask
+            )
+        else:
+            outputs = self.model(
+                inputs,
+                attention_mask=attention_mask
+            )
 
         shifted_logits = outputs[:, :-1].contiguous()
         shifted_targets = targets[:, 1:].contiguous()
@@ -291,6 +300,7 @@ class IterativeAutoregressiveTrainer(AutoregressiveTrainer):
             is_sft: bool = False,
             collect_log_interval: int = 100,
             use_iterable_dataset: bool = True,
+            debug_timing: bool = False,
             **kwargs
     ):
         super().__init__(
@@ -308,6 +318,7 @@ class IterativeAutoregressiveTrainer(AutoregressiveTrainer):
         )
         self.collect_n_batches = collect_n_batches
         self.collect_log_interval = collect_log_interval
+        self.debug_timing = debug_timing
 
     def _run_epoch(
             self,
@@ -408,11 +419,40 @@ class IterativeAutoregressiveTrainer(AutoregressiveTrainer):
             batch_size: int,
             scaler: torch.cuda.amp.GradScaler = None
     ):
+        start_time = None
+
+        pre_forward_time = 0
+        forward_time = 0
+
+        forward_times = []
+        backward_times = []
+
         """Train on collected batches"""
         for i, batch in enumerate(collected_batches):
             if not self.is_running:
                 break
             if self.get_batch_size(batch) == batch_size:
+                if self.debug_timing:
+                    if i == 100:
+                        start_time = datetime.timestamp(datetime.now())
+                    elif i == 200:
+                        end_time = datetime.timestamp(datetime.now())
+                        b100_time = end_time - start_time
+                        b_time = b100_time / 100.0
+                        i_time = b_time / batch_size
+                        print(f'100 batches time: {b100_time}')
+                        print(f'1 batch time: {b_time}')
+                        print(f'item time: {i_time}')
+
+                        forward_b_time = sum(forward_times) / len(forward_times)
+                        backward_b_time = sum(backward_times) / len(backward_times)
+
+                        print(f'Forward batch: {forward_b_time} / example: {forward_b_time / batch_size}')
+                        print(f'Backward batch: {backward_b_time} / example: {backward_b_time / batch_size}')
+
+                if self.debug_timing and 100 < i < 200:
+                    pre_forward_time = datetime.timestamp(datetime.now())
+
                 self.total_steps += 1
                 self.epoch_steps = base_batch_idx + i + 1
                 accumulated_tokens += batch['attention_mask'].sum()
@@ -421,15 +461,22 @@ class IterativeAutoregressiveTrainer(AutoregressiveTrainer):
                 self.accumulated_loss += loss
                 loss = loss / self.gradient_accumulation_steps
 
+                if self.debug_timing and 100 < i < 200:
+                    forward_time = datetime.timestamp(datetime.now())
+                    forward_times.append(forward_time - pre_forward_time)
+
                 if self.use_amp and scaler is not None:
                     scaler.scale(loss).backward()
                 else:
                     loss.backward()
 
+                if self.debug_timing and 100 < i < 200:
+                    backward_times.append(datetime.timestamp(datetime.now()) - forward_time)
+
                 self.optimizer_step_count += 1
                 if self.optimizer_step_count % self.gradient_accumulation_steps == 0:
                     # Clip gradients after accumulation
-                    if self.use_amp:
+                    if self.use_amp and scaler is not None:
                         scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0, error_if_nonfinite=False)
                     if self.use_amp and scaler is not None:
@@ -443,36 +490,41 @@ class IterativeAutoregressiveTrainer(AutoregressiveTrainer):
                     if scheduler is not None:
                         scheduler.step()
 
-                    if self.writer and self.total_steps % self.tensorboard_interval == 0:
-                        loss_item = (self.accumulated_loss / self.gradient_accumulation_steps).item()
-                        self.writer.add_scalar(
-                            'Loss/train',
-                            loss_item,
-                            self.total_steps,
-                        )
-                        self.writer.add_scalar(
-                            'Loss/train last epoch',
-                            loss_item,
-                            self.epoch_steps
-                        )
-                        self.writer.add_scalar(
-                            'Perplexity/train',
-                            torch.exp(torch.tensor(loss_item)),
-                            self.total_steps,
-                        )
-
-                        self.total_tokens += accumulated_tokens.item()
-                        accumulated_tokens = torch.tensor(0, device=self.device, dtype=torch.long)
-                        self.writer.add_scalar(
-                            'Processed tokens',
-                            self.total_tokens,
-                            self.total_steps
-                        )
-
                     self.accumulated_loss = torch.tensor(0.0, device=self.device)
                     self.optimizer_step_count = 0
 
+                if self.writer and self.total_steps % self.tensorboard_interval == 0:
+                    loss_item = (loss * self.gradient_accumulation_steps).item()
+                    self.writer.add_scalar(
+                        'Loss/train',
+                        loss_item,
+                        self.total_steps,
+                    )
+                    self.writer.add_scalar(
+                        'Loss/train last epoch',
+                        loss_item,
+                        self.epoch_steps
+                    )
+                    self.writer.add_scalar(
+                        'Perplexity/train',
+                        torch.exp(torch.tensor(loss_item)),
+                        self.total_steps,
+                    )
+
+                    self.total_tokens += accumulated_tokens.item()
+                    accumulated_tokens = torch.tensor(0, device=self.device, dtype=torch.long)
+                    self.writer.add_scalar(
+                        'Processed tokens',
+                        self.total_tokens,
+                        self.total_steps
+                    )
+
                 for callback in self.callbacks:
-                    should_stop = callback.on_batch_end(self.model, self.epoch_steps, loss, batch)
+                    should_stop = callback.on_batch_end(self.model, self.epoch_steps, loss * self.gradient_accumulation_steps, batch)
                     if should_stop:
                         self.is_running = False
+
+        for callback in self.callbacks:
+            should_stop = callback.on_iteration_end(self.model, self.epoch_steps)
+            if should_stop:
+                self.is_running = False

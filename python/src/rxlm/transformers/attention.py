@@ -149,7 +149,7 @@ class MultiHeadAttention(nn.Module):
 
     def _transpose_output(self, attn_output: torch.Tensor, b: int, t: int, d: int):
         """Transpose attention output back to (B, T, D) shape"""
-        return attn_output.transpose(1, 2).contiguous().view(b, t, d)
+        return attn_output.transpose(1, 2).contiguous().view(b, t, self.head_dim * self.num_heads)
 
     def _calculate_output(self, attn_weights: torch.Tensor, v: torch.Tensor, b: int, t: int, d: int):
         """Calculate the output by multiplying attention weights with values and concatenating heads"""

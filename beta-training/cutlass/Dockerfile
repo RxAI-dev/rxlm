@@ -37,7 +37,7 @@ RUN pip install --upgrade pip setuptools wheel ninja
 RUN pip install torch==2.9.0 --index-url https://download.pytorch.org/whl/cu130
 
 # Instalacja RxLM 0.3.65 wraz z zależnościami
-RUN pip install rxlm==0.3.65 transformers tokenizers huggingface_hub datasets tensorboard nltk
+RUN pip install rxlm==0.3.81 transformers tokenizers huggingface_hub datasets tensorboard nltk
 
 # Instalacja grouped_gemm z CUTLASS - wymuszamy architekturę H100 (9.0)
 RUN GROUPED_GEMM_CUTLASS=1 \
