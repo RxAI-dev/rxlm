@@ -25,11 +25,11 @@ class ShortTermMemory(nn.Module):
         init_type = init_type or self.init_type
         stm_shape = (self.num_layers, self.batch_size, self.stm_size, self.embed_dim)
         if init_type == 'normal':
-            return torch.normal(0, 0.02, stm_shape)
+            return torch.normal(0, 0.01, stm_shape)
         elif init_type == 'standard':
             return torch.normal(0, 1.0, stm_shape)
         elif init_type == 'uniform':
-            return torch.rand(*stm_shape) * 0.02
+            return torch.rand(*stm_shape) * 0.01
         elif init_type == 'ones':
             return torch.ones(*stm_shape)
         else:
@@ -60,9 +60,13 @@ class ShortTermMemory(nn.Module):
             self.register_buffer('memory', trained_stm)
 
     def reset(self, init_type: str = None):
-        if self.init_type == 'standard':
+        init_type = init_type or self.init_type
+        if init_type == 'standard':
             stm_shape = (self.num_layers, self.batch_size, self.stm_size, self.embed_dim)
             self.memory = torch.randn(*stm_shape, device=self.memory.device, dtype=self.memory.dtype)
+        elif init_type == 'normal':
+            stm_shape = (self.num_layers, self.batch_size, self.stm_size, self.embed_dim)
+            self.memory = torch.randn(*stm_shape, device=self.memory.device, dtype=self.memory.dtype) * 0.01
         else:
             self.memory = self._init_tensor(init_type).to(self.memory.device, dtype=self.memory.dtype)
 

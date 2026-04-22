@@ -34,15 +34,21 @@ class TrainerCallback:
         bool, None]:
         pass
 
+    def on_validation_batch_end(self, model: nn.Module, batch_idx: int, loss: torch.Tensor, batch: dict[str, torch.Tensor], metrics: dict):
+        pass
+
 
 class PrintLossCallback(TrainerCallback):
-    def __init__(self, batch_log_interval: int = 100, joint_mode: bool = False, batches_per_epoch: int = None):
+    def __init__(self, batch_log_interval: int = 100, joint_mode: bool = False, batches_per_epoch: int = None, num_valid_batches: int = None):
         self.epoch_means = []
         self.epoch_losses = []
         self.batch_group_losses = []
         self.batch_log_interval = batch_log_interval
         self.joint_mode = joint_mode
         self.batches_per_epoch = batches_per_epoch
+        self.num_valid_batches = num_valid_batches
+
+        self.valid_batch_group_losses = []
 
     def on_batch_end(self, model: nn.Module, batch_idx: int, loss: torch.Tensor,
                      batch: dict[str, torch.Tensor]) -> None:
@@ -55,6 +61,19 @@ class PrintLossCallback(TrainerCallback):
             if self.batches_per_epoch is not None:
                 print(
                     f'Batch {batch_idx} / {self.batches_per_epoch} - loss: {loss}, last {self.batch_log_interval} batches mean loss: {batch_group_mean:.4f}')
+            else:
+                print(
+                    f'Batch {batch_idx} - loss: {loss}, last {self.batch_log_interval} batches mean loss: {batch_group_mean:.4f}')
+
+    def on_validation_batch_end(self, model: nn.Module, batch_idx: int, loss: torch.Tensor, batch: dict[str, torch.Tensor], metrics: dict):
+        self.valid_batch_group_losses.append(loss)
+
+        if batch_idx != 0 and batch_idx % self.batch_log_interval == 0:
+            batch_group_mean = torch.stack(self.valid_batch_group_losses).mean().item()
+            self.valid_batch_group_losses = []
+            if self.num_valid_batches is not None:
+                print(
+                    f'Batch {batch_idx} / {self.num_valid_batches} - loss: {loss}, last {self.batch_log_interval} batches mean loss: {batch_group_mean:.4f}')
             else:
                 print(
                     f'Batch {batch_idx} - loss: {loss}, last {self.batch_log_interval} batches mean loss: {batch_group_mean:.4f}')

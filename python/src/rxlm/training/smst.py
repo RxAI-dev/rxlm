@@ -769,7 +769,7 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
         processed = 0
 
         with torch.no_grad():
-            for batch in val_dataloader:
+            for batch_idx, batch in enumerate(val_dataloader):
                 if self.get_batch_size(batch) == batch_size:
                     processed += 1
                     val_loss = torch.tensor(0.0).to(self.device)
@@ -856,12 +856,20 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
                         else:
                             avg_step_acc = step_acc
 
+                        val_metrics = {
+                            'accuracy': avg_step_acc,
+                            'node_accuracy': step_acc,
+                            'loss': decoder_loss.item()
+                        }
+
                         if self.writer is not None:
-                            self._valid_step_writer(self.valid_inner_steps, decoder_loss.item(), {
-                                'accuracy': avg_step_acc,
-                                'node_accuracy': step_acc,
-                                'loss': decoder_loss.item()
-                            }, inner_step=inner_step_idx)
+                            self._valid_step_writer(self.valid_inner_steps, decoder_loss.item(), val_metrics, inner_step=inner_step_idx)
+
+                        for callback in self.callbacks:
+                            callback.on_validation_batch_end(
+                                self.model, (batch_idx * number_of_inner_steps) + inner_step_idx,
+                                decoder_loss, valid_batch['next'], val_metrics
+                            )
 
                     all_val_loss += val_loss / number_of_inner_steps
 

@@ -2606,6 +2606,7 @@ class HybridReasoningSmatDataset(Dataset):
             system_field: str = 'system',
             system_prompt_title: str = 'SYSTEM INSTRUCTIONS',
             default_system_prompt: str = 'You are RxT - stateful reactive language model (RxLM) made for conversational AI',
+            vocab_size: int = None,
             **kwargs,
     ):
         super(HybridReasoningSmatDataset, self).__init__(**kwargs)
@@ -2641,6 +2642,7 @@ class HybridReasoningSmatDataset(Dataset):
         self.is_pre_tokenized = False
         self.is_list = isinstance(self.episodes, list)
         self.inputs = []
+        self.vocab_size = vocab_size if vocab_size is not None else self.tokenizer.vocab_size
 
     def __len__(self):
         return len(self.inputs if self.is_pre_tokenized else self.episodes)
@@ -2698,8 +2700,8 @@ class HybridReasoningSmatDataset(Dataset):
         )
 
         query_input_ids = query_enc['input_ids'][0]
-        if not (query_input_ids < self.tokenizer.vocab_size).all():
-            query_input_ids[query_input_ids >= self.tokenizer.vocab_size] = self.tokenizer.unk_token_id
+        if not (query_input_ids < self.vocab_size).all():
+            query_input_ids[query_input_ids >= self.vocab_size] = self.tokenizer.unk_token_id
         if not (query_input_ids >= 0).all():
             query_input_ids[query_input_ids < 0] = self.tokenizer.unk_token_id
 
@@ -2714,8 +2716,8 @@ class HybridReasoningSmatDataset(Dataset):
         )
 
         answer_input_ids = answer_enc['input_ids'][0]
-        if not (answer_input_ids < self.tokenizer.vocab_size).all():
-            answer_input_ids[answer_input_ids >= self.tokenizer.vocab_size] = self.tokenizer.unk_token_id
+        if not (answer_input_ids < self.vocab_size).all():
+            answer_input_ids[answer_input_ids >= self.vocab_size] = self.tokenizer.unk_token_id
         if not (answer_input_ids >= 0).all():
             answer_input_ids[answer_input_ids < 0] = self.tokenizer.unk_token_id
 
