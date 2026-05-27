@@ -84,3 +84,77 @@ class ResidualGate(nn.Module):
             layer_gate = self._dynamic_gate(old_value, new_value)
 
         return self._calculate_output(layer_gate, old_value, new_value)
+
+
+class GranularResidualGate(nn.Module):
+    def __init__(
+            self,
+            stm_size: int,
+            embed_dim: int,
+            use_gate: bool = False,
+            gate_type: ResidualGateType = 'static',
+            init_gate: float = 0.0,
+            use_tanh_gate: bool = True,
+            disable_residual: bool = False,
+            per_slot_elementwise: bool = False,
+            **kwargs,
+    ):
+        super(GranularResidualGate, self).__init__(**kwargs)
+        self.use_gate = use_gate
+        self.gate_type = gate_type
+        self.use_tanh_gate = use_tanh_gate
+        self.disable_residual = disable_residual
+        self.per_slot_elementwise = per_slot_elementwise
+
+        if self.use_gate:
+            if self.gate_type == 'linear':
+                self.gate = nn.Linear(embed_dim, embed_dim)
+            else:
+                if self.per_slot_elementwise:
+                    self.gate = nn.Parameter(torch.full((embed_dim,), init_gate))
+                else:
+                    self.gate = nn.Parameter(torch.full((stm_size, embed_dim), init_gate))
+        else:
+            self.gate = None
+
+        self.gate_activation = nn.Tanh() if self.use_tanh_gate else nn.Sigmoid()
+
+
+    def _slot_statuses(self, updated_stm: torch.Tensor):
+        if self.gate_type == 'linear':
+            if self.slot_status_type == 'linear':
+                return self.slot_status(updated_stm).squeeze(-1)
+            else:
+                return updated_stm.mean(dim=-1)
+        else:
+            if self.per_slot_gate and self.slot_status_type == 'linear':
+                return self.slot_status(updated_stm)
+            else:
+                mean_dim = -1 if self.per_slot_gate else [1, 2]
+                return updated_stm.mean(dim=mean_dim, keepdim=True)
+
+    def _dynamic_gate(self, old_value: torch.Tensor, new_value: torch.Tensor):
+        if self.gate_type == 'linear':
+            gate_input = self.gate(new_value + old_value).unsqueeze(-1)
+        else:
+            gate_input = self.gate * (new_value + old_value)
+        return self.gate_activation(gate_input)
+
+    def _calculate_output(self, layer_gate: torch.Tensor, old_value: torch.Tensor, new_value: torch.Tensor) -> torch.Tensor:
+        if self.use_tanh_gate:
+            return (1 + layer_gate) * new_value + (1 - layer_gate) * old_value
+        else:
+            return layer_gate * new_value + (1 - layer_gate) * old_value
+
+    def forward(self, old_value: torch.Tensor, new_value: torch.Tensor) -> torch.Tensor:
+        if self.disable_residual:
+            return new_value
+        if not self.use_gate:
+            return new_value + old_value
+
+        if self.gate_type == 'static':
+            layer_gate = self.gate_activation(self.gate)
+        else:
+            layer_gate = self._dynamic_gate(old_value, new_value)
+
+        return self._calculate_output(layer_gate, old_value, new_value)

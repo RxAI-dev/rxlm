@@ -1,12 +1,13 @@
 import torch
 import torch.nn.functional as F
+import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel
 import math, random
-from typing import Union, Callable, Any
+from typing import Union, Callable, Any, Iterator
 from ..training.base import BaseTrainer
 from .models import SupervisedMemoryAwareModel, MemoryAttentionTrainingModel
 from .ddp import distributed_value_mean, distributed_mean
-from .utils import TokenizedDict, smart_concat
+from .utils import TokenizedDict, smart_concat, get_gradient_norms
 from .dataset import MrlCurriculumDataset
 
 
@@ -146,7 +147,7 @@ class SupervisedMemoryAttentionTrainer(BaseTrainer):
                         self.optimizer_step_count += 1
                         if self.optimizer_step_count % self.gradient_accumulation_steps == 0:
                             # Clip gradients after accumulation
-                            if self.use_amp:
+                            if self.use_amp and scaler is not None:
                                 scaler.unscale_(optimizer)
                             torch.nn.utils.clip_grad_norm_(self._get_model().trainable_parameters(), max_norm=1.0,
                                                            error_if_nonfinite=False)
@@ -437,7 +438,10 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
             unfreeze_epochs: tuple[int, int] = (0, 0),
             use_system_prompt: bool = False,
             use_unfreeze: bool = False,
+            skip_encoder_rc: bool = False,
             dataset_collate_fn: Callable[[list[Any]], dict[str, Any]] = MrlCurriculumDataset.collate_mrl_batch,
+            log_gradient_norms_get_ext_params: Callable[[], dict[str, Iterator[nn.Parameter]]] = None,
+            skip_first_step_optim: bool = False,
             **kwargs
     ):
         super(SupervisedMemoryAwareTrainer, self).__init__(
@@ -455,6 +459,9 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
         self.unfreeze_epochs = unfreeze_epochs
         self.use_system_prompt = use_system_prompt
         self.use_unfreeze = use_unfreeze
+        self.skip_encoder_rc = skip_encoder_rc
+        self.log_gradient_norms_get_ext_params = log_gradient_norms_get_ext_params
+        self.skip_first_step_optim = skip_first_step_optim
 
         if not self.train_only_decoder and self.use_unfreeze:
             mem_attn_unfreeze_epoch, encoder_unfreeze_epoch = self.unfreeze_epochs
@@ -462,7 +469,8 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
                 self._get_model().memory_attention.freeze()
 
             if encoder_unfreeze_epoch != 0:
-                self._get_model().encoder.freeze_all()
+                if not self.skip_encoder_rc:
+                    self._get_model().encoder.freeze_all()
 
     def _get_model(self):
         model = self.model
@@ -491,7 +499,8 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
                 self._get_model().memory_attention.unfreeze()
 
             if encoder_unfreeze_epoch == epoch:
-                self._get_model().encoder.unfreeze_all(True, True) # TODO: Remove freeze memory after removing cross-attn from encoder
+                if not self.skip_encoder_rc:
+                    self._get_model().encoder.unfreeze_all(True, True) # TODO: Remove freeze memory after removing cross-attn from encoder
 
         self.accumulated_loss = torch.tensor(0.0, device=self.device)
         self.optimizer_step_count = 0
@@ -515,6 +524,8 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
 
                     for inner_step_idx in range(number_of_inner_steps):
                         self.total_inner_steps += 1
+
+                        skip_step_optim = inner_step_idx == 0 and self.skip_first_step_optim
 
                         if inner_step_idx == 0:
                             next_query, next_answer = prev_query, prev_answer
@@ -561,6 +572,7 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
                         self.accumulated_loss += loss
                         loss = loss / self.gradient_accumulation_steps
 
+
                         if self.use_amp and scaler is not None:
                             scaler.scale(loss).backward()
                         else:
@@ -568,42 +580,42 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
 
                         self.optimizer_step_count += 1
                         if self.optimizer_step_count % self.gradient_accumulation_steps == 0:
-                            # Clip gradients after accumulation
-                            if self.use_amp:
-                                scaler.unscale_(optimizer)
-                            torch.nn.utils.clip_grad_norm_(self._get_model().trainable_parameters(), max_norm=1.0,
-                                                           error_if_nonfinite=False)
-                            if self.use_amp and scaler is not None:
-                                scaler.step(optimizer)
-                                scaler.update()
+                            if not skip_step_optim:
+                                # Clip gradients after accumulation
+                                if self.use_amp:
+                                    scaler.unscale_(optimizer)
+                                torch.nn.utils.clip_grad_norm_(self._get_model().trainable_parameters(), max_norm=1.0,
+                                                               error_if_nonfinite=False)
+                                if self.use_amp and scaler is not None:
+                                    scaler.step(optimizer)
+                                    scaler.update()
+                                else:
+                                    optimizer.step()
+
+                                optimizer.zero_grad()
+
+                                if scheduler is not None:
+                                    scheduler.step()
                             else:
-                                optimizer.step()
-
-                            optimizer.zero_grad()
-
-                            if scheduler is not None:
-                                scheduler.step()
+                                optimizer.zero_grad()
+                                if scheduler is not None:
+                                    scheduler.step()
 
                             self.accumulated_loss = torch.tensor(0.0, device=self.device)
                             self.optimizer_step_count = 0
 
+                        prev_query, prev_answer = self._move_multiple_batches(next_query, next_answer)
+
                         if self.writer and self.total_steps % self.tensorboard_interval:
                             loss_item = loss.item() * self.gradient_accumulation_steps
+
+                            self.total_tokens += accumulated_tokens.item()
+                            accumulated_tokens = torch.tensor(0, dtype=torch.long, device=self.device)
+
                             self._train_writer(
                                 loss_item,
                                 epoch_step=(batch_idx * number_of_inner_steps) + inner_step_idx,
                                 inner_step=inner_step_idx,
-                            )
-
-                        prev_query, prev_answer = self._move_multiple_batches(next_query, next_answer)
-
-                        if self.writer and self.total_steps % self.tensorboard_interval:
-                            self.total_tokens += accumulated_tokens.item()
-                            accumulated_tokens = torch.tensor(0, dtype=torch.long, device=self.device)
-                            self.writer.add_scalar(
-                                'Processed tokens',
-                                self.total_tokens,
-                                self.total_inner_steps
                             )
 
                         for callback in self.callbacks:
@@ -731,6 +743,54 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
             torch.exp(torch.tensor(loss)).item(),
             self.total_inner_steps,
         )
+
+        self.writer.add_scalar(
+            'Processed tokens',
+            self.total_tokens,
+            self.total_inner_steps
+        )
+
+        self._gradient_norms_writer(inner_step)
+
+    def _gradient_norms_writer(self, inner_step: int):
+        if not self.skip_encoder_rc:
+            encoder_total, encoder_mean = get_gradient_norms(self._get_model().encoder.parameters())
+
+            if self.writer is not None:
+                self.writer.add_scalar('Gradient/encoder mean', encoder_mean, self.total_inner_steps)
+                self.writer.add_scalar('Gradient/encoder total', encoder_total, self.total_inner_steps)
+
+                self.writer.add_scalar(f'Gradient/encoder mean (step: {inner_step})', encoder_mean, self.total_inner_steps)
+                self.writer.add_scalar(f'Gradient/encoder total (step: {inner_step})', encoder_total, self.total_inner_steps)
+
+
+
+        decoder_total, decoder_mean = get_gradient_norms(self._get_model().decoder.parameters())
+        mem_att_total, mem_att_mean = get_gradient_norms(self._get_model().memory_attention.parameters())
+
+        if self.writer is not None:
+            self.writer.add_scalar('Gradient/decoder mean', decoder_mean, self.total_inner_steps)
+            self.writer.add_scalar('Gradient/decoder total', decoder_total, self.total_inner_steps)
+            self.writer.add_scalar('Gradient/mem-attention mean', mem_att_mean, self.total_inner_steps)
+            self.writer.add_scalar('Gradient/mem-attention total', mem_att_total, self.total_inner_steps)
+
+            self.writer.add_scalar(f'Gradient/decoder mean (step: {inner_step})', decoder_mean, self.total_inner_steps)
+            self.writer.add_scalar(f'Gradient/decoder total (step: {inner_step})', decoder_total, self.total_inner_steps)
+            self.writer.add_scalar(f'Gradient/mem-attention mean (step: {inner_step})', mem_att_mean, self.total_inner_steps)
+            self.writer.add_scalar(f'Gradient/mem-attention total (step: {inner_step})', mem_att_total, self.total_inner_steps)
+
+        if self.log_gradient_norms_get_ext_params is not None:
+            log_extra_params = self.log_gradient_norms_get_ext_params()
+
+            for name, param in log_extra_params.items():
+                p_total, p_mean = get_gradient_norms(param)
+
+                if self.writer is not None:
+                    self.writer.add_scalar(f'Gradient/{name} mean', p_mean, self.total_inner_steps)
+                    self.writer.add_scalar(f'Gradient/{name} total', p_total, self.total_inner_steps)
+
+                    self.writer.add_scalar(f'Gradient/{name} mean (step: {inner_step})', p_mean, self.total_inner_steps)
+                    self.writer.add_scalar(f'Gradient/{name} total (step: {inner_step})', p_total, self.total_inner_steps)
 
     def _valid_writer(self, epoch: int, val_loss: float, val_metrics: dict):
         self.writer.add_scalar('Loss/Valid', val_loss, epoch)

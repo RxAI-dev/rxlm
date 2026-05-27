@@ -56,15 +56,15 @@ set -e\n\
 \n\
 echo "=== Reactive AI Training Setup ==="\n\
 echo "Installing local RxLM libs..."\n\
-pip install /workspace/libs/rxlm-0.3.93-py3-none-any.whl\n\
-pip install /workspace/libs/rxlm_pro-0.2.64-py3-none-any.whl\n\
+pip install /workspace/libs/rxlm-0.3.99-py3-none-any.whl\n\
+pip install /workspace/libs/rxlm_pro-0.2.68-py3-none-any.whl\n\
 echo "Checking Transformer Engine installation..."\n\
 \n\
 # Sprawdź czy Transformer Engine jest już zainstalowany\n\
 if python -c "import transformer_engine" 2>/dev/null; then\n\
     echo "Transformer Engine already installed, skipping..."\n\
 else\n\
-    echo "Installing Transformer Engine 2.8.0"\n\
+    echo "Installing Transformer Engine 2.9.0"\n\
     echo "This may take 10-20 minutes..."\n\
     pip3 install --no-build-isolation transformer-engine[pytorch]==2.9.0\n\
     echo "Transformer Engine installed successfully!"\n\
@@ -75,7 +75,7 @@ echo "=== Starting RxT-Beta Training ==="\n\
 echo ""\n\
 \n\
 # Uruchom trening\n\
-exec torchrun --standalone --nnodes=1 --nproc-per-node=2 /workspace/training/rx-qwen.py "$@"\n' > /entrypoint.sh \
+exec torchrun --standalone --nnodes=1 --nproc-per-node=4 /workspace/training/rx-qwen.py "$@"\n' > /entrypoint.sh \
     && chmod +x /entrypoint.sh
 
 # Użyj skryptu startowego jako entrypoint
