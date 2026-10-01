@@ -2773,8 +2773,8 @@ class HybridReasoningSmatDataset(Dataset):
             return {
                 'query': first['query'],
                 'answer': first['answer'],
-                'system': system_enc,
                 'interactions': follow_ups,
+                **system_enc,
             }
         else:
             return {
@@ -2941,6 +2941,44 @@ class HybridReasoningSmatDataset(Dataset):
 
         return {
             **collate_interaction_batch(batch),
+            'interactions': [
+                collate_interaction_batch(list(step_batch)) for step_batch in transposed_interactions
+            ]
+        }
+
+
+    @staticmethod
+    def collate_hybrid_smat_batch_with_system(batch: list[dict]) -> dict:
+        """Collate function for HybridReasoningSmatDataset with nested interactions."""
+
+        def collate_interaction_batch(interaction_batch: list) -> dict[str, dict[str, torch.Tensor]]:
+            """Helper to collate a batch of interactions."""
+            return {
+                'query': {
+                    'input_ids': torch.stack([x['query']['input_ids'] for x in interaction_batch]),
+                    'attention_mask': torch.stack([x['query']['attention_mask'] for x in interaction_batch]),
+                },
+                'answer': {
+                    'input_ids': torch.stack([x['answer']['input_ids'] for x in interaction_batch]),
+                    'attention_mask': torch.stack([x['answer']['attention_mask'] for x in interaction_batch]),
+                }
+            }
+
+        def collate_system(system_prompts: list):
+            return {
+                'system': {
+                    'input_ids': torch.stack([x['system']['input_ids'] for x in system_prompts]),
+                    'attention_mask': torch.stack([x['system']['attention_mask'] for x in system_prompts]),
+                },
+            }
+
+        batch_interactions = [x['interactions'] for x in batch]
+
+        transposed_interactions = list(zip(*batch_interactions))
+
+        return {
+            **collate_interaction_batch(batch),
+            **collate_system(batch),
             'interactions': [
                 collate_interaction_batch(list(step_batch)) for step_batch in transposed_interactions
             ]

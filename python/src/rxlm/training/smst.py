@@ -239,6 +239,7 @@ class SupervisedMemoryAttentionTrainer(BaseTrainer):
             encoder_inputs,
             attention_mask=encoder_mask,
             noise_level=input_noise,
+            turn_idx=inner_step_idx,
         )
 
         acc_weight, new_weight = weights
@@ -442,6 +443,7 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
             dataset_collate_fn: Callable[[list[Any]], dict[str, Any]] = MrlCurriculumDataset.collate_mrl_batch,
             log_gradient_norms_get_ext_params: Callable[[], dict[str, Iterator[nn.Parameter]]] = None,
             skip_first_step_optim: bool = False,
+            log_residual_statuses: bool = False,
             **kwargs
     ):
         super(SupervisedMemoryAwareTrainer, self).__init__(
@@ -462,6 +464,8 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
         self.skip_encoder_rc = skip_encoder_rc
         self.log_gradient_norms_get_ext_params = log_gradient_norms_get_ext_params
         self.skip_first_step_optim = skip_first_step_optim
+
+        self.log_residual_statuses = log_residual_statuses
 
         if not self.train_only_decoder and self.use_unfreeze:
             mem_attn_unfreeze_epoch, encoder_unfreeze_epoch = self.unfreeze_epochs
@@ -540,6 +544,8 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
 
                         if self.use_amp:
                             with torch.amp.autocast(device_type=self.device.type, dtype=self.dtype):
+                                self._pre_process_system_prompt(inner_step_idx, batch)
+
                                 train_batch = {
                                     'prev': smart_concat(prev_query, prev_answer, max_length=self.max_seq_len,
                                                          pad_token_id=self.pad_token_id) if not self.use_system_prompt or inner_step_idx != 0 else self._move_batch(batch['system']),
@@ -547,10 +553,11 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
                                                          pad_token_id=self.pad_token_id),
                                 }
                                 accumulated_tokens += train_batch['next']['attention_mask'].sum()
-                                loss, _ = self.compute_loss(train_batch, query_lens=query_lens, answer_lens=answer_lens, is_first_step=not self.use_system_prompt and inner_step_idx==0)
+                                loss, _ = self.compute_loss(train_batch, query_lens=query_lens, answer_lens=answer_lens, is_first_step=not self.use_system_prompt and inner_step_idx==0, inner_step_idx=inner_step_idx)
                         elif self.use_te_fp8:
                             from transformer_engine.pytorch import fp8_autocast
                             with fp8_autocast(enabled=True, fp8_recipe=self.fp8_recipe):
+                                self._pre_process_system_prompt(inner_step_idx, batch)
                                 train_batch = {
                                     'prev': smart_concat(prev_query, prev_answer, max_length=self.max_seq_len,
                                                          pad_token_id=self.pad_token_id) if not self.use_system_prompt or inner_step_idx != 0 else self._move_batch(batch['system']),
@@ -558,8 +565,9 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
                                                          pad_token_id=self.pad_token_id),
                                 }
                                 accumulated_tokens += train_batch['next']['attention_mask'].sum()
-                                loss, _ = self.compute_loss(train_batch, query_lens=query_lens, answer_lens=answer_lens, is_first_step=not self.use_system_prompt and inner_step_idx==0)
+                                loss, _ = self.compute_loss(train_batch, query_lens=query_lens, answer_lens=answer_lens, is_first_step=not self.use_system_prompt and inner_step_idx==0, inner_step_idx=inner_step_idx)
                         else:
+                            self._pre_process_system_prompt(inner_step_idx, batch)
                             train_batch = {
                                 'prev': smart_concat(prev_query, prev_answer, max_length=self.max_seq_len,
                                                      pad_token_id=self.pad_token_id) if not self.use_system_prompt or inner_step_idx != 0 else self._move_batch(batch['system']),
@@ -567,7 +575,7 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
                                                      pad_token_id=self.pad_token_id),
                             }
                             accumulated_tokens += train_batch['next']['attention_mask'].sum()
-                            loss, _ = self.compute_loss(train_batch, query_lens=query_lens, answer_lens=answer_lens, is_first_step=not self.use_system_prompt and inner_step_idx==0)
+                            loss, _ = self.compute_loss(train_batch, query_lens=query_lens, answer_lens=answer_lens, is_first_step=not self.use_system_prompt and inner_step_idx==0, inner_step_idx=inner_step_idx)
 
                         self.accumulated_loss += loss
                         loss = loss / self.gradient_accumulation_steps
@@ -660,6 +668,18 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
     def _move_multiple_batches(self, *batches: TokenizedDict) -> list[TokenizedDict]:
         return [self._move_batch(batch) for batch in batches]
 
+    def _pre_process_system_prompt(self, inner_step_idx: int, batch: dict) -> None:
+        if self.use_system_prompt and inner_step_idx == 0 and 'system' in batch:
+            system_batch = self._move_batch(batch['system'])
+            model = self._get_model()
+            with torch.no_grad():
+                model.decoder.reset_self_attn_cache()
+                model.decoder(
+                    system_batch['input_ids'],
+                    attention_mask=system_batch['attention_mask'],
+                    use_self_attn_cache=True,
+                )
+
     def _moe_aux_loss(self, main_loss: torch.Tensor) -> torch.Tensor:
         if not self.use_moe_aux_loss:
             return main_loss
@@ -681,7 +701,7 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
 
     def compute_loss(
             self, batch: dict[str, dict[str, torch.Tensor]], query_lens: torch.Tensor = None,
-            answer_lens: torch.Tensor = None, is_first_step: bool = False
+            answer_lens: torch.Tensor = None, is_first_step: bool = False, inner_step_idx: int = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
         encoder_inputs = batch['prev']['input_ids']
         encoder_mask = batch['prev']['attention_mask']
@@ -695,6 +715,7 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
             encoder_mask=encoder_mask,
             decoder_mask=decoder_mask,
             is_first_step=is_first_step,
+            turn_idx=inner_step_idx,
         )
 
         shifted_logits = decoder_logits[:, :-1].contiguous()
@@ -751,6 +772,61 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
         )
 
         self._gradient_norms_writer(inner_step)
+
+        if self.log_residual_statuses:
+            self._log_residual_gate_values(inner_step)
+            self._log_residual_slot_statuses(inner_step)
+
+            self.writer.add_scalar(
+                f'ResidualGate/turn embedding mean (step: {inner_step})',
+                getattr(self._get_model().memory_attention, 'get_turn_embedding_mean', lambda i: 0.0)(inner_step),
+                self.total_inner_steps,
+            )
+
+    def _log_residual_slot_statuses(self, inner_step_idx: int) -> None:
+        get_statuses = getattr(self._get_model().memory_attention, 'get_residual_slot_statuses', None)
+        if get_statuses is None:
+            return
+
+        layer_statuses = get_statuses()
+
+        total_means = 0.0
+        total_stds = 0.0
+
+        for layer_status in layer_statuses:
+            total_means += layer_status.mean().item()
+            total_stds += layer_status.std().item()
+
+        mean_status = total_means / len(layer_statuses)
+        std_status = total_stds / len(layer_statuses)
+
+        self.writer.add_scalar(f'ResidualGate/Statuses mean', mean_status, self.total_inner_steps)
+        self.writer.add_scalar(f'ResidualGate/Statuses std', std_status, self.total_inner_steps)
+        self.writer.add_scalar(f'ResidualGate/Statuses mean (step: {inner_step_idx})', mean_status, self.total_inner_steps)
+        self.writer.add_scalar(f'ResidualGate/Statuses std (step: {inner_step_idx})', std_status, self.total_inner_steps)
+
+
+    def _log_residual_gate_values(self, inner_step_idx: int) -> None:
+        """TensorBoard logging for the memory-attention residual gates (see
+        ``rxlm_pro.memory.gate.DiagnosticResidualGate``) - same idea as the decoder
+        ``Gate/mean value`` logging above, but for the STM update interpolation gate:
+        values near 0 mean STM never updates (frozen at its old state), values near 1
+        mean it never accumulates history (always overwritten by the new candidate).
+        A no-op if ``memory_attention`` isn't built from the diagnostic gate classes.
+        """
+        get_values = getattr(self._get_model().memory_attention, 'get_residual_gate_values', None)
+        if get_values is None:
+            return
+        for pathway, values in get_values().items():
+            present = [v for v in values if v is not None]
+            if not present:
+                continue
+            pathway_mean = torch.cat([v.reshape(-1) for v in present]).mean()
+            self.writer.add_scalar(f'ResidualGate/{pathway} mean value', pathway_mean.item(), self.total_inner_steps)
+            self.writer.add_scalar(
+                f'ResidualGate/{pathway} mean value (step: {inner_step_idx})',
+                pathway_mean.item(), self.total_inner_steps,
+            )
 
     def _gradient_norms_writer(self, inner_step: int):
         if not self.skip_encoder_rc:
@@ -858,16 +934,20 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
 
                         if self.use_amp:
                             with torch.amp.autocast(device_type=self.device.type, dtype=self.dtype):
+                                self._pre_process_system_prompt(inner_step_idx, batch)
+
                                 valid_batch = {
                                     'prev': smart_concat(prev_query, prev_answer, max_length=self.max_seq_len,
                                                          pad_token_id=self.pad_token_id) if not self.use_system_prompt or inner_step_idx != 0 else self._move_batch(batch['system']),
                                     'next': smart_concat(next_query, next_answer, max_length=self.max_seq_len,
                                                          pad_token_id=self.pad_token_id),
                                 }
-                                decoder_loss, decoder_logits = self.compute_loss(valid_batch, query_lens=query_lens, answer_lens=answer_lens, is_first_step=not self.use_system_prompt and inner_step_idx==0)
+                                decoder_loss, decoder_logits = self.compute_loss(valid_batch, query_lens=query_lens, answer_lens=answer_lens, is_first_step=not self.use_system_prompt and inner_step_idx==0, inner_step_idx=inner_step_idx)
                         elif self.use_te_fp8:
                             from transformer_engine.pytorch import fp8_autocast
                             with fp8_autocast(enabled=True, fp8_recipe=self.fp8_recipe):
+                                self._pre_process_system_prompt(inner_step_idx, batch)
+
                                 valid_batch = {
                                     'prev': smart_concat(prev_query, prev_answer, max_length=self.max_seq_len,
                                                          pad_token_id=self.pad_token_id) if not self.use_system_prompt or inner_step_idx != 0 else self._move_batch(batch['system']),
@@ -875,15 +955,17 @@ class SupervisedMemoryAwareTrainer(BaseTrainer):
                                                          pad_token_id=self.pad_token_id),
                                 }
                                 decoder_loss, decoder_logits = self.compute_loss(valid_batch, query_lens=query_lens, answer_lens=answer_lens,
-                                                                                 is_first_step=not self.use_system_prompt and inner_step_idx == 0)
+                                                                                 is_first_step=not self.use_system_prompt and inner_step_idx == 0, inner_step_idx=inner_step_idx)
                         else:
+                            self._pre_process_system_prompt(inner_step_idx, batch)
+
                             valid_batch = {
                                 'prev': smart_concat(prev_query, prev_answer, max_length=self.max_seq_len,
                                                      pad_token_id=self.pad_token_id) if not self.use_system_prompt or inner_step_idx != 0 else self._move_batch(batch['system']),
                                 'next': smart_concat(next_query, next_answer, max_length=self.max_seq_len,
                                                      pad_token_id=self.pad_token_id),
                             }
-                            decoder_loss, decoder_logits = self.compute_loss(valid_batch, query_lens=query_lens, answer_lens=answer_lens, is_first_step=not self.use_system_prompt and inner_step_idx==0)
+                            decoder_loss, decoder_logits = self.compute_loss(valid_batch, query_lens=query_lens, answer_lens=answer_lens, is_first_step=not self.use_system_prompt and inner_step_idx==0, inner_step_idx=inner_step_idx)
 
                         val_loss += decoder_loss
 
